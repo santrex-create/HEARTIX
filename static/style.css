@@ -1,0 +1,1273 @@
+/* ==========================================================================
+   HEARTIX — ICU BEDSIDE TELEMETRY STYLESHEET
+   Hybrid Classic ICU Bedside + Modern Dark Clinical Grid
+   ========================================================================== */
+
+:root {
+  --bg-obsidian: #05080D;
+  --bg-panel: #0B111B;
+  --bg-panel-elevated: #101826;
+  --border-subtle: #1C2638;
+  --border-strong: #2A3954;
+
+  --text-primary: #F1F5F9;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+
+  --ecg-green: #00E676;
+  --ecg-green-dim: rgba(0, 230, 118, 0.14);
+  --clinical-cyan: #38BDF8;
+  --clinical-cyan-dim: rgba(56, 189, 248, 0.14);
+  --tech-teal: #06B6D4;
+  --alert-amber: #F59E0B;
+  --alert-amber-dim: rgba(245, 158, 11, 0.16);
+  --alarm-red: #FF3B30;
+  --alarm-red-dim: rgba(255, 59, 48, 0.2);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background-color: var(--bg-obsidian);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ==========================================================================
+   MONITOR SHELL LAYOUT
+   ========================================================================== */
+.monitor-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 100vh;
+  background: var(--bg-obsidian);
+}
+
+/* ==========================================================================
+   TOP STATUS BAR
+   ========================================================================== */
+.top-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.brand-patient-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.brand-mark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 14px;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.brand-pulse-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ecg-green);
+  box-shadow: 0 0 8px var(--ecg-green);
+}
+
+.brand-title {
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--text-primary);
+}
+
+.brand-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ecg-green);
+  background: var(--ecg-green-dim);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.patient-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.patient-name {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
+.patient-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.patient-id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--clinical-cyan);
+  background: var(--clinical-cyan-dim);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+.telemetry-badges-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.badge-label {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.badge-value {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.badge-value.status-online {
+  color: var(--ecg-green);
+}
+
+.badge-value.status-offline {
+  color: var(--alarm-red);
+}
+
+.badge-value.status-sim {
+  color: var(--alert-amber);
+}
+
+.sqi-bar-track {
+  width: 44px;
+  height: 6px;
+  background: #172033;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.sqi-bar-fill {
+  height: 100%;
+  background: var(--ecg-green);
+  transition: width 0.25s ease, background-color 0.25s ease;
+}
+
+.hdr-clock {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  padding-left: 6px;
+}
+
+/* ==========================================================================
+   ALARM / MODE BANNER
+   ========================================================================== */
+.alarm-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.alarm-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.alarm-indicator-light {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.alarm-text {
+  font-family: var(--font-mono);
+  font-weight: 800;
+  font-size: 12.5px;
+  letter-spacing: 0.05em;
+}
+
+.alarm-reason {
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+/* Alarm States */
+.alarm-banner.alarm-none {
+  background: #080E17;
+  color: var(--text-secondary);
+}
+
+.alarm-banner.alarm-none .alarm-indicator-light {
+  background: var(--ecg-green);
+}
+
+.alarm-banner.alarm-technical {
+  background: rgba(6, 182, 212, 0.16);
+  border-bottom-color: var(--tech-teal);
+  color: #67E8F9;
+}
+
+.alarm-banner.alarm-technical .alarm-indicator-light {
+  background: var(--tech-teal);
+  box-shadow: 0 0 8px var(--tech-teal);
+}
+
+.alarm-banner.alarm-medium {
+  background: var(--alert-amber-dim);
+  border-bottom-color: var(--alert-amber);
+  color: #FCD34D;
+}
+
+.alarm-banner.alarm-medium .alarm-indicator-light {
+  background: var(--alert-amber);
+  box-shadow: 0 0 10px var(--alert-amber);
+}
+
+.alarm-banner.alarm-high {
+  background: var(--alarm-red);
+  border-bottom-color: #FF6B63;
+  color: #FFFFFF;
+  animation: highAlarmFlash 0.9s infinite alternate;
+}
+
+.alarm-banner.alarm-high .alarm-indicator-light {
+  background: #FFFFFF;
+  box-shadow: 0 0 12px #FFFFFF;
+}
+
+@keyframes highAlarmFlash {
+  0% { background-color: #D91E18; }
+  100% { background-color: #FF3B30; }
+}
+
+.sim-watermark {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #05080D;
+  background: var(--alert-amber);
+  padding: 3px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   MAIN CLINICAL WORKSPACE (~70% ECG Canvas / ~30% Parameter Cards)
+   ========================================================================== */
+.clinical-workspace {
+  display: grid;
+  grid-template-columns: 7fr 3fr;
+  gap: 10px;
+  padding: 10px 14px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* LEFT ECG MONITOR PANEL */
+.ecg-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 340px;
+}
+
+.ecg-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  background: var(--bg-panel-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.lead-badge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ecg-green);
+  font-weight: 700;
+}
+
+.lead-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ecg-green);
+}
+
+.ecg-meta-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.meta-chip {
+  color: var(--text-secondary);
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-subtle);
+  padding: 2px 7px;
+  border-radius: 3px;
+}
+
+.canvas-wrapper {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  background: #04070B;
+  overflow: hidden;
+}
+
+#ecgCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.frozen-badge {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(56, 189, 248, 0.18);
+  border: 1px solid var(--clinical-cyan);
+  color: var(--clinical-cyan);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 4px;
+  letter-spacing: 0.06em;
+  z-index: 5;
+}
+
+.canvas-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  background: rgba(5, 8, 13, 0.86);
+  backdrop-filter: blur(2px);
+  z-index: 6;
+}
+
+.overlay-icon {
+  font-size: 28px;
+  color: var(--alert-amber);
+  margin-bottom: 10px;
+}
+
+.overlay-title {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+
+.overlay-sub {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  max-width: 440px;
+}
+
+/* ==========================================================================
+   RIGHT CLINICAL PARAMETER CARDS (~30%)
+   ========================================================================== */
+.parameters-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.param-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.card-hr {
+  border-left: 3px solid var(--ecg-green);
+}
+
+.card-rr {
+  border-left: 3px solid var(--clinical-cyan);
+}
+
+.card-qrs {
+  border-left: 3px solid var(--text-primary);
+}
+
+.card-ai {
+  border-left: 3px solid var(--tech-teal);
+  flex: 1;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.card-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.card-limits,
+.card-unit-tag,
+.card-conf {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.card-limits strong,
+.card-conf strong {
+  color: var(--text-secondary);
+}
+
+/* HR Readout */
+.hr-readout-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.hr-value {
+  font-family: var(--font-mono);
+  font-size: 52px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--ecg-green);
+  letter-spacing: -0.02em;
+}
+
+.hr-unit-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.heart-icon {
+  font-size: 22px;
+  color: var(--ecg-green);
+  opacity: 0.45;
+  transform: scale(1);
+  transition: transform 0.09s ease-out, opacity 0.09s ease-out;
+}
+
+.heart-icon.beat-pulse {
+  opacity: 1;
+  transform: scale(1.38);
+  text-shadow: 0 0 12px var(--ecg-green);
+}
+
+.param-unit {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ecg-green);
+}
+
+/* Dual Metrics (RR/HRV & QRS/ST) */
+.dual-metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.metric-cell {
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.metric-sublabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+
+.metric-value {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.cyan-text {
+  color: var(--clinical-cyan);
+}
+
+.white-text {
+  color: var(--text-primary);
+}
+
+.amber-text {
+  color: var(--alert-amber) !important;
+}
+
+.st-status-pill {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(241, 245, 249, 0.1);
+  color: var(--text-primary);
+}
+
+.st-status-pill.st-alert {
+  background: var(--alert-amber-dim);
+  color: var(--alert-amber);
+  border: 1px solid var(--alert-amber);
+}
+
+/* AI Rhythm Card */
+.ai-status-pill {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 7px 10px;
+  border-radius: 4px;
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.ai-status-pill.rhythm-normal {
+  border-color: var(--ecg-green);
+  background: var(--ecg-green-dim);
+  color: var(--ecg-green);
+}
+
+.ai-status-pill.rhythm-warning {
+  border-color: var(--alert-amber);
+  background: var(--alert-amber-dim);
+  color: var(--alert-amber);
+}
+
+.ai-status-pill.rhythm-critical {
+  border-color: var(--alarm-red);
+  background: var(--alarm-red-dim);
+  color: #FF7A73;
+}
+
+.ai-reason-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.rhythm-flags-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: auto;
+}
+
+.rhythm-flag {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 4px 4px;
+  border-radius: 3px;
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+}
+
+.rhythm-flag.flag-active-amber {
+  background: var(--alert-amber-dim);
+  border-color: var(--alert-amber);
+  color: var(--alert-amber);
+}
+
+.rhythm-flag.flag-active-red {
+  background: var(--alarm-red-dim);
+  border-color: var(--alarm-red);
+  color: #FF6B63;
+}
+
+/* ==========================================================================
+   DISCRETE LAB TEST BAR
+   ========================================================================== */
+.lab-test-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 14px;
+  background: #121722;
+  border-top: 1px solid var(--alert-amber);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.lab-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--alert-amber);
+  letter-spacing: 0.06em;
+}
+
+.lab-btn-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.lab-btn {
+  background: var(--bg-obsidian);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 4px 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lab-btn:hover {
+  border-color: var(--alert-amber);
+  color: var(--alert-amber);
+}
+
+.lab-btn.active {
+  background: var(--alert-amber);
+  color: #05080D;
+  border-color: var(--alert-amber);
+  font-weight: 700;
+}
+
+.lab-btn-stop {
+  border-color: var(--alarm-red);
+  color: #FF7A73;
+}
+
+.lab-btn-stop:hover {
+  background: var(--alarm-red);
+  color: #FFFFFF;
+}
+
+/* ==========================================================================
+   BOTTOM ICU SOFT-KEY CONTROL BAR
+   ========================================================================== */
+.softkey-bar {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.softkey-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-panel-elevated);
+  border: 1px solid var(--border-strong);
+  border-bottom: 3px solid #2D3E5C;
+  border-radius: 5px;
+  padding: 6px 4px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color 0.14s ease, border-color 0.14s ease, transform 0.08s ease;
+  user-select: none;
+}
+
+.softkey-btn:hover {
+  background: #172336;
+  border-color: var(--clinical-cyan);
+}
+
+.softkey-btn:active {
+  transform: translateY(1px);
+}
+
+.softkey-btn.active {
+  background: rgba(0, 230, 118, 0.14);
+  border-color: var(--ecg-green);
+  border-bottom-color: var(--ecg-green);
+}
+
+.softkey-btn.muted-active {
+  background: var(--alert-amber-dim);
+  border-color: var(--alert-amber);
+  border-bottom-color: var(--alert-amber);
+  color: var(--alert-amber);
+}
+
+.softkey-lab.active {
+  background: var(--alert-amber-dim);
+  border-color: var(--alert-amber);
+  border-bottom-color: var(--alert-amber);
+}
+
+.sk-top {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sk-sub {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.event-badge {
+  background: var(--alarm-red);
+  color: #FFFFFF;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-weight: 800;
+}
+
+/* ==========================================================================
+   STARTUP "ADMIT PATIENT" MODAL
+   ========================================================================== */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 6, 11, 0.88);
+  backdrop-filter: blur(5px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 580px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-top: 3px solid var(--ecg-green);
+  border-radius: 8px;
+  padding: 22px 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.75);
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.modal-title {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: 0.04em;
+}
+
+.modal-subtitle {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+
+.modal-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ecg-green);
+  background: var(--ecg-green-dim);
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.form-grid-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.form-group label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.form-group input,
+.form-group select {
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+  border-color: var(--ecg-green);
+}
+
+.modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.btn-primary,
+.btn-secondary {
+  padding: 9px 16px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--ecg-green);
+  color: #05080D;
+  border: 1px solid var(--ecg-green);
+}
+
+.btn-primary:hover {
+  background: #29F08D;
+}
+
+.btn-secondary {
+  background: var(--bg-obsidian);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+}
+
+.btn-secondary:hover {
+  color: var(--text-primary);
+  border-color: var(--clinical-cyan);
+}
+
+/* ==========================================================================
+   SLIDE-OUT ABNORMALITY EVENTS DRAWER
+   ========================================================================== */
+.events-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 440px;
+  max-width: 95vw;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -16px 0 40px rgba(0, 0, 0, 0.75);
+  display: flex;
+  flex-direction: column;
+  z-index: 90;
+}
+
+.drawer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: var(--bg-panel-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.drawer-title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.drawer-sub {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.btn-close-drawer {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn-close-drawer:hover {
+  color: var(--text-primary);
+  border-color: var(--alarm-red);
+}
+
+.drawer-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 12px;
+}
+
+.snapshot-viewer {
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 8px;
+  flex-shrink: 0;
+}
+
+.snapshot-header {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+#eventSnapshotCanvas {
+  width: 100%;
+  height: 120px;
+  display: block;
+  background: #04070B;
+  border-radius: 3px;
+}
+
+.events-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.event-item {
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--alert-amber);
+  border-radius: 4px;
+  padding: 9px 11px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.event-item:hover,
+.event-item.selected {
+  border-color: var(--clinical-cyan);
+}
+
+.event-item.severity-high {
+  border-left-color: var(--alarm-red);
+}
+
+.empty-events {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  padding: 28px 12px;
+}
+
+/* ==========================================================================
+   RESPONSIVE BREAKPOINTS (Tablets & Phones)
+   ========================================================================== */
+@media (max-width: 1120px) {
+  .monitor-shell {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .clinical-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .ecg-panel {
+    height: 360px;
+  }
+
+  .parameters-panel {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .softkey-bar {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+@media (max-width: 680px) {
+  .parameters-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .softkey-bar {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .form-grid-2,
+  .form-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ==========================================================================
+   PRINT REPORT STYLESHEET (@media print)
+   ========================================================================== */
+.print-report-container {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 12mm;
+  }
+
+  body {
+    background: #FFFFFF !important;
+    color: #0F172A !important;
+    overflow: visible !important;
+  }
+
+  .monitor-shell,
+  .modal-backdrop,
+  .events-drawer {
+    display: none !important;
+  }
+
+  .print-report-container {
+    display: block !important;
+    width: 100%;
+    background: #FFFFFF;
+    color: #0F172A;
+    font-family: var(--font-sans);
+  }
+
+  .print-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 2px solid #0F172A;
+    padding-bottom: 8px;
+    margin-bottom: 12px;
+  }
+
+  .print-hospital-title {
+    font-size: 18px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    color: #0F172A;
+  }
+
+  .print-hospital-sub {
+    font-size: 12px;
+    color: #475569;
+  }
+
+  .print-meta-right {
+    text-align: right;
+    font-size: 11px;
+    color: #334155;
+  }
+
+  .print-patient-box {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    background: #F8FAFC;
+    border: 1px solid #CBD5E1;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    margin-bottom: 12px;
+  }
+
+  .print-section-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: #1E293B;
+    margin: 10px 0 5px;
+    letter-spacing: 0.04em;
+  }
+
+  .print-strip-section {
+    margin-bottom: 12px;
+  }
+
+  #printEcgCanvas {
+    width: 100%;
+    height: 190px;
+    display: block;
+    border: 1px solid #E11D48;
+    background-color: #FFF5F5;
+    background-image:
+      linear-gradient(to right, rgba(225, 29, 72, 0.22) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(225, 29, 72, 0.22) 1px, transparent 1px),
+      linear-gradient(to right, rgba(225, 29, 72, 0.09) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(225, 29, 72, 0.09) 1px, transparent 1px);
+    background-size: 25px 25px, 25px 25px, 5px 5px, 5px 5px;
+  }
+
+  .print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    margin-bottom: 10px;
+  }
+
+  .print-table th,
+  .print-table td {
+    border: 1px solid #CBD5E1;
+    padding: 5px 8px;
+    text-align: left;
+  }
+
+  .print-table th {
+    background: #F1F5F9;
+    font-weight: 700;
+    color: #0F172A;
+  }
+
+  .print-footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 16px;
+    padding-top: 8px;
+    border-top: 1px solid #CBD5E1;
+    font-size: 11px;
+    color: #475569;
+  }
+}

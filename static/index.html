@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HEARTIX — ICU Telemetry &amp; Clinical ECG Monitor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- LIVE MONITOR SHELL (Hidden during print) -->
+  <div id="monitorShell" class="monitor-shell">
+    
+    <!-- TOP STATUS BAR -->
+    <header class="top-status-bar">
+      <div class="brand-patient-group">
+        <div class="brand-mark">
+          <span class="brand-pulse-dot"></span>
+          <span class="brand-title">HEARTIX</span>
+          <span class="brand-sub">ICU-ECG</span>
+        </div>
+        <div class="patient-strip">
+          <span id="hdrPatientName" class="patient-name">UNASSIGNED PATIENT</span>
+          <span id="hdrPatientMeta" class="patient-meta">-- yrs | -- | Bed --</span>
+          <span id="hdrPatientId" class="patient-id">ID: ---</span>
+        </div>
+      </div>
+
+      <div class="telemetry-badges-group">
+        <div class="status-badge">
+          <span class="badge-label">SRV</span>
+          <span id="badgeServer" class="badge-value status-offline">OFFLINE</span>
+        </div>
+        <div class="status-badge">
+          <span class="badge-label">ESP32</span>
+          <span id="badgeEsp32" class="badge-value status-offline">DISCONNECTED</span>
+        </div>
+        <div class="status-badge">
+          <span class="badge-label">PKT LOSS</span>
+          <span id="badgePacketLoss" class="badge-value">0.0%</span>
+        </div>
+        <div class="status-badge sqi-badge">
+          <span class="badge-label">SQI</span>
+          <div class="sqi-bar-track">
+            <div id="sqiBarFill" class="sqi-bar-fill" style="width: 0%;"></div>
+          </div>
+          <span id="badgeSqi" class="badge-value">---</span>
+        </div>
+        <div id="hdrClock" class="hdr-clock">00:00:00</div>
+      </div>
+    </header>
+
+    <!-- ALARM / MODE BANNER -->
+    <section id="alarmBanner" class="alarm-banner alarm-none" role="alert" aria-live="assertive">
+      <div class="alarm-left">
+        <span class="alarm-indicator-light"></span>
+        <span id="alarmText" class="alarm-text">SYSTEM STANDBY — NO ACTIVE CLINICAL ALARMS</span>
+        <span id="alarmReason" class="alarm-reason">Awaiting physiological telemetry stream</span>
+      </div>
+      <div id="simWatermark" class="sim-watermark hidden">
+        LAB SIMULATION MODE — NOT REAL PATIENT DATA
+      </div>
+    </section>
+
+    <!-- MAIN CLINICAL WORKSPACE -->
+    <main class="clinical-workspace">
+      
+      <!-- LEFT PANEL: LIVE ECG WAVEFORM MONITOR (~70%) -->
+      <section class="ecg-panel">
+        <div class="ecg-panel-header">
+          <div class="lead-badge">
+            <span class="lead-dot"></span>
+            <span>LEAD II — DIAGNOSTIC FILTER (0.5–40 Hz)</span>
+          </div>
+          <div class="ecg-meta-right">
+            <span id="metaSource" class="meta-chip">SOURCE: HARDWARE ESP32</span>
+            <span id="metaSpeedGain" class="meta-chip">25 mm/s | 10 mm/mV</span>
+          </div>
+        </div>
+
+        <div class="canvas-wrapper">
+          <canvas id="ecgCanvas"></canvas>
+
+          <div id="frozenBadge" class="frozen-badge hidden">
+            WAVEFORM FROZEN — BACKGROUND ACQUISITION ACTIVE
+          </div>
+
+          <div id="canvasOverlay" class="canvas-overlay">
+            <div class="overlay-icon">⚡</div>
+            <div id="canvasOverlayTitle" class="overlay-title">
+              ESP32 NOT CONNECTED — POWER ON HEARTIX DEVICE TO BEGIN
+            </div>
+            <div id="canvasOverlaySub" class="overlay-sub">
+              Verify USB-Serial / WebSocket telemetry bridge or enable Lab Test Mode below
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT PANEL: CLINICAL PARAMETER CARDS (~30%) -->
+      <aside class="parameters-panel">
+        
+        <!-- CARD 1: HEART RATE -->
+        <div class="param-card card-hr">
+          <div class="card-header">
+            <span class="card-title">HEART RATE (ECG)</span>
+            <span class="card-limits">LIMITS <strong id="valHrLimits">60–100</strong> bpm</span>
+          </div>
+          <div class="hr-readout-row">
+            <div id="valBpm" class="hr-value">---</div>
+            <div class="hr-unit-group">
+              <span id="heartIcon" class="heart-icon" aria-hidden="true">♥</span>
+              <span class="param-unit">BPM</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 2: RR INTERVAL & HRV -->
+        <div class="param-card card-rr">
+          <div class="card-header">
+            <span class="card-title">RR INTERVAL &amp; HRV (RMSSD)</span>
+            <span class="card-unit-tag">ms</span>
+          </div>
+          <div class="dual-metric-grid">
+            <div class="metric-cell">
+              <span class="metric-sublabel">R-R INTERVAL</span>
+              <span id="valRr" class="metric-value cyan-text">---</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-sublabel">HRV (RMSSD)</span>
+              <span id="valHrv" class="metric-value cyan-text">---</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 3: QRS & ST SEGMENT SCREENING -->
+        <div class="param-card card-qrs">
+          <div class="card-header">
+            <span class="card-title">MORPHOLOGY &amp; ST SCREENING</span>
+            <span id="valStStatus" class="st-status-pill">Screening</span>
+          </div>
+          <div class="dual-metric-grid">
+            <div class="metric-cell">
+              <span class="metric-sublabel">QRS DURATION (ms)</span>
+              <span id="valQrs" class="metric-value white-text">---</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-sublabel">ST DEVIATION (mV)</span>
+              <span id="valSt" class="metric-value white-text">---</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 4: AI RHYTHM CLASSIFICATION & FLAGS -->
+        <div class="param-card card-ai">
+          <div class="card-header">
+            <span class="card-title">AI RHYTHM &amp; BEAT ANALYSIS</span>
+            <span class="card-conf">CONF: <strong id="valAiConfidence">---</strong></span>
+          </div>
+          <div id="aiStatusPill" class="ai-status-pill">WAITING FOR ESP32 HARDWARE</div>
+          <div id="valAiReason" class="ai-reason-text">
+            Real-time morphological &amp; interval classifier standing by.
+          </div>
+          <div class="rhythm-flags-row">
+            <span id="flagBrady" class="rhythm-flag">BRADY</span>
+            <span id="flagTachy" class="rhythm-flag">TACHY</span>
+            <span id="flagArrhythmia" class="rhythm-flag">ARRHYTHMIA</span>
+          </div>
+        </div>
+
+      </aside>
+    </main>
+
+    <!-- DISCRETE LOCKABLE LAB TEST BAR (Hidden by default) -->
+    <section id="labTestBar" class="lab-test-bar hidden" aria-label="Synthetic ECG Signal Generator">
+      <div class="lab-bar-label">
+        <span class="lab-tag">SYNTHETIC SIMULATOR</span>
+      </div>
+      <div class="lab-btn-group">
+        <button type="button" class="lab-btn" data-sim-mode="normal">Normal Sinus</button>
+        <button type="button" class="lab-btn" data-sim-mode="tachycardia">Sinus Tachy</button>
+        <button type="button" class="lab-btn" data-sim-mode="bradycardia">Sinus Brady</button>
+        <button type="button" class="lab-btn" data-sim-mode="arrhythmia">AFib / Arrhythmia</button>
+        <button type="button" class="lab-btn" data-sim-mode="st_elevation">ST Elevation</button>
+        <button type="button" class="lab-btn" data-sim-mode="motion_artifact">Motion Artifact</button>
+        <button type="button" class="lab-btn" data-sim-mode="leads_off">Leads Off</button>
+        <button type="button" id="btnSimStop" class="lab-btn lab-btn-stop">Stop Sim</button>
+      </div>
+    </section>
+
+    <!-- BOTTOM ICU SOFT-KEY CONTROL BAR -->
+    <footer class="softkey-bar">
+      <button type="button" id="btnFreeze" class="softkey-btn">
+        <span class="sk-top">FREEZE</span>
+        <span class="sk-sub">HOLD TRACE</span>
+      </button>
+      <button type="button" id="btnStop" class="softkey-btn">
+        <span class="sk-top">STOP / RUN</span>
+        <span class="sk-sub">STREAM</span>
+      </button>
+      <button type="button" id="btnReset" class="softkey-btn">
+        <span class="sk-top">RESET</span>
+        <span class="sk-sub">CLEAR BUFFER</span>
+      </button>
+      <button type="button" id="btnSpeed" class="softkey-btn">
+        <span class="sk-top">SWEEP</span>
+        <span class="sk-sub">25 / 50 mm/s</span>
+      </button>
+      <button type="button" id="btnGain" class="softkey-btn">
+        <span class="sk-top">GAIN</span>
+        <span class="sk-sub">5 / 10 / 20</span>
+      </button>
+      <button type="button" id="btnQrsBeep" class="softkey-btn active">
+        <span class="sk-top">QRS TONE</span>
+        <span class="sk-sub">ON</span>
+      </button>
+      <button type="button" id="btnMuteAlarms" class="softkey-btn">
+        <span class="sk-top">AUDIO PAUSE</span>
+        <span class="sk-sub">2 MIN MUTE</span>
+      </button>
+      <button type="button" id="btnEvents" class="softkey-btn">
+        <span class="sk-top">EVENTS <span id="eventCountBadge" class="event-badge">0</span></span>
+        <span class="sk-sub">ALARM LOG</span>
+      </button>
+      <button type="button" id="btnSaveCsv" class="softkey-btn">
+        <span class="sk-top">EXPORT CSV</span>
+        <span class="sk-sub">RAW SAMPLES</span>
+      </button>
+      <button type="button" id="btnPdfReport" class="softkey-btn">
+        <span class="sk-top">12-SEC STRIP</span>
+        <span class="sk-sub">PRINT / PDF</span>
+      </button>
+      <button type="button" id="btnPatient" class="softkey-btn">
+        <span class="sk-top">PATIENT</span>
+        <span class="sk-sub">ADMIT / LIMITS</span>
+      </button>
+      <button type="button" id="btnLabTest" class="softkey-btn softkey-lab">
+        <span class="sk-top">LAB TEST</span>
+        <span class="sk-sub">SIMULATOR</span>
+      </button>
+    </footer>
+
+  </div>
+
+  <!-- STARTUP "ADMIT PATIENT" MODAL (Visible by default) -->
+  <div id="patientModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="modalTitle" class="modal-title">HEARTIX — PATIENT ADMISSION &amp; ALARM LIMITS</h2>
+          <p class="modal-subtitle">Configure patient demographics and physiological alarm thresholds prior to bedside telemetry.</p>
+        </div>
+        <span class="modal-badge">ICU STATION 01</span>
+      </div>
+
+      <form id="patientForm" class="modal-form">
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label for="inpPatientName">Patient Full Name *</label>
+            <input type="text" id="inpPatientName" placeholder="e.g., Aarav Sharma" required />
+          </div>
+          <div class="form-group">
+            <label for="inpPatientId">Medical Record / Patient ID</label>
+            <input type="text" id="inpPatientId" placeholder="HTX-2026-001" value="HTX-2026-001" />
+          </div>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="form-group">
+            <label for="inpPatientAge">Age (Years) *</label>
+            <input type="number" id="inpPatientAge" min="1" max="120" placeholder="45" required />
+          </div>
+          <div class="form-group">
+            <label for="inpPatientGender">Biological Sex</label>
+            <select id="inpPatientGender">
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="inpPatientBed">Ward / Bed</label>
+            <input type="text" id="inpPatientBed" placeholder="ICU-01" value="ICU-01" />
+          </div>
+        </div>
+
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label for="inpMinHr">Low HR Alarm Limit (BPM)</label>
+            <input type="number" id="inpMinHr" min="25" max="120" value="60" required />
+          </div>
+          <div class="form-group">
+            <label for="inpMaxHr">High HR Alarm Limit (BPM)</label>
+            <input type="number" id="inpMaxHr" min="80" max="240" value="100" required />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="inpNotes">Clinical Notes / Indication</label>
+          <input type="text" id="inpNotes" placeholder="Optional: Post-op telemetry, chest pain evaluation, baseline rhythm..." />
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" id="btnGuestMode" class="btn-secondary">
+            Quick Guest Mode (Default Limits)
+          </button>
+          <button type="submit" id="btnStartMonitoring" class="btn-primary">
+            Admit &amp; Start Bedside Monitoring
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- SLIDE-OUT ABNORMALITY EVENTS DRAWER (Hidden by default) -->
+  <aside id="eventsDrawer" class="events-drawer hidden" aria-label="Recorded Abnormality Events">
+    <div class="drawer-header">
+      <div>
+        <h3 class="drawer-title">CLINICAL ALARM &amp; RHYTHM EVENTS</h3>
+        <span class="drawer-sub">Click any captured episode to inspect 6-second ECG waveform strip</span>
+      </div>
+      <button type="button" id="btnCloseEvents" class="btn-close-drawer" aria-label="Close Events Drawer">✕</button>
+    </div>
+
+    <div class="drawer-body">
+      <div class="snapshot-viewer">
+        <div class="snapshot-header">
+          <span>CAPTURED EVENT WAVEFORM STRIP</span>
+          <span id="eventSnapshotMeta" class="snapshot-meta">No event selected</span>
+        </div>
+        <canvas id="eventSnapshotCanvas"></canvas>
+      </div>
+
+      <div id="eventsList" class="events-list">
+        <div class="empty-events">No clinical arrhythmia or threshold events recorded in current session.</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- HIDDEN PRINT REPORT CONTAINER (Revealed only in @media print) -->
+  <section id="printReportContainer" class="print-report-container">
+    <div class="print-header">
+      <div>
+        <h1 class="print-hospital-title">HEARTIX CLINICAL TELEMETRY REPORT</h1>
+        <p class="print-hospital-sub">Single-Lead Diagnostic ECG &amp; AI Rhythm Screening Summary</p>
+      </div>
+      <div class="print-meta-right">
+        <div><strong>Generated:</strong> <span id="printTimestamp">--</span></div>
+        <div><strong>Calibration:</strong> 25 mm/s | 10 mm/mV | 0.5–40 Hz</div>
+      </div>
+    </div>
+
+    <div id="printPatientInfo" class="print-patient-box"></div>
+
+    <div class="print-strip-section">
+      <div class="print-section-label">10-SECOND DIAGNOSTIC ECG RHYTHM STRIP (LEAD II)</div>
+      <canvas id="printEcgCanvas"></canvas>
+    </div>
+
+    <div class="print-section-label">CLINICAL PARAMETERS &amp; AI CLASSIFICATION SUMMARY</div>
+    <table id="printMetricsTable" class="print-table"></table>
+
+    <div class="print-section-label">RECORDED ABNORMALITY &amp; ALARM LOG</div>
+    <table id="printEventsTable" class="print-table"></table>
+
+    <div class="print-footer">
+      <div>Electronically generated by HEARTIX ICU Monitoring System. Clinical correlation required.</div>
+      <div>Physician Signature: _______________________________</div>
+    </div>
+  </section>
+
+  <!-- SCRIPTS IN EXACT REQUIRED ORDER -->
+  <script src="/static/audio_engine.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
