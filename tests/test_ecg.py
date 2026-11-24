@@ -9,12 +9,6 @@ from ai_classifier import HybridAIClassifier
 from ecg_processor import ECGProcessor
 from ecg_simulator import ECGSimulator
 
-from __future__ import annotations
-
-from ai_classifier import HybridAIClassifier
-from ecg_processor import ECGProcessor
-from ecg_simulator import ECGSimulator
-
 
 def _feed_seconds(proc: ECGProcessor, sim: ECGSimulator, mode: str, seconds: float = 4.0) -> dict:
     batches = int((seconds * 250) // 25)

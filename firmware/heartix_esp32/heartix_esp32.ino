@@ -18,7 +18,7 @@
  * Architecture:
  *  - Core 1 (Priority 3): Deterministic 250 Hz ADC1 sampling via vTaskDelayUntil
  *  - Core 0 (Priority 2): WiFiMulti + WSS (TLS) streaming via links2004/WebSockets
- *  - Zero-copy lock-free double buffering (54-byte packed binary frames, 10 Hz)
+ *  - Lock-free double buffering + 20-second SRAM offline ring buffer (200 pkts)
  */
 
 #include <Arduino.h>
@@ -26,22 +26,31 @@
 #include <WiFiMulti.h>
 #include <WebSocketsClient.h>
 
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#endif
+
 // ============================================================================
-// USER CONFIGURATION — UPDATE THESE 3 SECTIONS BEFORE FLASHING
+// FALLBACK CONFIGURATION (USED ONLY IF secrets.h IS NOT CREATED)
 // ============================================================================
-
-// 1. 2.4 GHz Wi-Fi Credentials (ESP32 does not support 5 GHz Wi-Fi)
-#define WIFI_SSID_1      "YOUR_PRIMARY_WIFI_SSID"
-#define WIFI_PASS_1      "YOUR_PRIMARY_WIFI_PASSWORD"
-
-#define WIFI_SSID_2      "YOUR_MOBILE_HOTSPOT_SSID"
-#define WIFI_PASS_2      "YOUR_MOBILE_HOTSPOT_PASSWORD"
-
-// 2. Render Cloud Hostname (DO NOT include "https://" or trailing "/")
-#define RENDER_HOST      "heartix-monitor.onrender.com"
-
-// 3. Device Authentication Token (MUST match HEARTIX_DEVICE_TOKEN on Render)
-#define DEVICE_TOKEN     "replace-with-your-secret-heartix-token"
+#ifndef WIFI_SSID_1
+  #define WIFI_SSID_1    "YOUR_PRIMARY_WIFI_SSID"
+#endif
+#ifndef WIFI_PASS_1
+  #define WIFI_PASS_1    "YOUR_PRIMARY_WIFI_PASSWORD"
+#endif
+#ifndef WIFI_SSID_2
+  #define WIFI_SSID_2    "YOUR_MOBILE_HOTSPOT_SSID"
+#endif
+#ifndef WIFI_PASS_2
+  #define WIFI_PASS_2    "YOUR_MOBILE_HOTSPOT_PASSWORD"
+#endif
+#ifndef RENDER_HOST
+  #define RENDER_HOST    "heartix.onrender.com"
+#endif
+#ifndef DEVICE_TOKEN
+  #define DEVICE_TOKEN   "replace-with-your-secret-heartix-token"
+#endif
 
 // ============================================================================
 // HARDWARE PIN DEFINITIONS (STRICTLY ADC1 TO AVOID WI-FI DRIVER CONFLICTS)
@@ -57,6 +66,7 @@ constexpr uint8_t STATUS_LED_PIN = 2;  // Onboard ESP32 Blue LED
 constexpr uint16_t SAMPLE_RATE_HZ     = 250;
 constexpr TickType_t SAMPLE_PERIOD_MS = 4;   // 1000 ms / 250 Hz = 4 ms exact
 constexpr uint8_t  BATCH_SIZE         = 25;  // 25 samples * 4 ms = 100 ms (10 pkt/s)
+constexpr uint16_t OFFLINE_RING_CAP   = 200; // 200 pkts = 20 seconds of SRAM backup
 
 struct __attribute__((packed)) EcgBinaryPacket {
     uint16_t seq;                  // Bytes 0-1: incrementing sequence counter (0..65535)
@@ -68,63 +78,95 @@ struct __attribute__((packed)) EcgBinaryPacket {
 static_assert(sizeof(EcgBinaryPacket) == 54, "Packet size must be 54 bytes");
 
 // ============================================================================
-// DOUBLE-BUFFER & SINGLE-QUEUE IPC STATE (NO MUTEXES REQUIRED)
+// DOUBLE-BUFFER, QUEUE & OFFLINE SRAM RING BUFFER STATE
 // ============================================================================
 static EcgBinaryPacket txBuffers[2];
-static QueueHandle_t   readyBufferQueue = nullptr;
+static EcgBinaryPacket offlineRing[OFFLINE_RING_CAP];
+static uint16_t        ringHead  = 0;
+static uint16_t        ringTail  = 0;
+static uint16_t        ringCount = 0;
 
-// Shared state flags between Core 0 and Core 1 (atomic single-byte reads/writes)
-static volatile bool wsConnected = false;
+static QueueHandle_t   readyBufferQueue = nullptr;
+static volatile bool   wsConnected      = false;
+static volatile uint32_t lastEdgeBeatMs = 0;
+
+void ringPush(const EcgBinaryPacket& pkt) {
+    offlineRing[ringHead] = pkt;
+    ringHead = (ringHead + 1) % OFFLINE_RING_CAP;
+    if (ringCount < OFFLINE_RING_CAP) {
+        ringCount++;
+    } else {
+        // Overwrite oldest packet when 20-second buffer is full
+        ringTail = (ringTail + 1) % OFFLINE_RING_CAP;
+    }
+}
+
+bool ringPop(EcgBinaryPacket& outPkt) {
+    if (ringCount == 0) return false;
+    outPkt = offlineRing[ringTail];
+    ringTail = (ringTail + 1) % OFFLINE_RING_CAP;
+    ringCount--;
+    return true;
+}
 
 // ============================================================================
-// CORE 1 TASK: DETERMINISTIC 250 HZ ECG SAMPLING
+// CORE 1 TASK: DETERMINISTIC 250 HZ ECG SAMPLING + EDGE R-PEAK PULSE
 // ============================================================================
 void samplingTask(void* pvParameters) {
     (void)pvParameters;
 
-    // Configure ADC1 for 0 - 3300 mV calibrated millivolt output
     analogReadResolution(12);
     analogSetPinAttenuation(ECG_PIN, ADC_11db);
 
-    uint8_t  activeBufIdx = 0;
-    uint8_t  sampleIdx    = 0;
-    uint16_t packetSeq    = 0;
+    uint8_t  activeBufIdx  = 0;
+    uint8_t  sampleIdx     = 0;
+    uint16_t packetSeq     = 0;
     bool     batchLeadsOff = false;
+
+    // Lightweight edge R-peak envelope for onboard LED heartbeat pulse
+    float    baselineMv    = 1650.0f;
+    float    peakEnvMv     = 250.0f;
+    uint32_t lastPeakTick  = 0;
 
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     for (;;) {
-        // 1. Read raw calibrated millivolts (NO moving average / EMA filtering)
         uint16_t mv = static_cast<uint16_t>(analogReadMilliVolts(ECG_PIN));
+        bool leadsDetached = (digitalRead(LO_PLUS_PIN) == HIGH || digitalRead(LO_MINUS_PIN) == HIGH);
 
-        // 2. Check hardware leads-off comparator pins (HIGH = electrode detached)
-        if (digitalRead(LO_PLUS_PIN) == HIGH || digitalRead(LO_MINUS_PIN) == HIGH) {
+        if (leadsDetached) {
             batchLeadsOff = true;
+        } else {
+            // Track slow baseline and R-wave deflection for local LED heartbeat pulse
+            baselineMv = 0.985f * baselineMv + 0.015f * static_cast<float>(mv);
+            float diffMv = static_cast<float>(mv) - baselineMv;
+            peakEnvMv = max(140.0f, 0.995f * peakEnvMv);
+            if (diffMv > peakEnvMv) {
+                peakEnvMv = 0.75f * peakEnvMv + 0.25f * diffMv;
+            }
+            uint32_t nowMs = millis();
+            if (diffMv > (0.60f * peakEnvMv) && (nowMs - lastPeakTick) > 260) {
+                lastPeakTick = nowMs;
+                lastEdgeBeatMs = nowMs;
+            }
         }
 
-        // 3. Store into active double-buffer slot
         txBuffers[activeBufIdx].samples[sampleIdx] = mv;
         sampleIdx++;
 
-        // 4. Once 25 samples (100 ms) are collected, seal packet and hand off to Core 0
         if (sampleIdx >= BATCH_SIZE) {
             txBuffers[activeBufIdx].seq   = packetSeq++;
             txBuffers[activeBufIdx].flags = batchLeadsOff ? 0x01 : 0x00;
             txBuffers[activeBufIdx].count = BATCH_SIZE;
 
             uint8_t completedIdx = activeBufIdx;
-
-            // Swap to the alternate buffer immediately for the next 4 ms tick
             activeBufIdx ^= 1;
             sampleIdx     = 0;
             batchLeadsOff = false;
 
-            // Non-blocking queue send: if Core 0 is stalled on Wi-Fi reconnect,
-            // drop oldest/skip without ever delaying Core 1's 250 Hz clock.
             xQueueSend(readyBufferQueue, &completedIdx, 0);
         }
 
-        // 5. Sleep until the exact next 4 ms boundary
         vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
     }
 }
@@ -140,7 +182,7 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
         case WStype_DISCONNECTED:
             if (wsConnected) {
-                Serial.println("[WS] Disconnected from Render backend. Reconnecting...");
+                Serial.println("[WS] Disconnected from Render backend. Buffering to SRAM...");
             }
             wsConnected = false;
             break;
@@ -155,10 +197,6 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
             Serial.println("[WS] TLS/WebSocket error encountered.");
             break;
 
-        case WStype_TEXT:
-        case WStype_BIN:
-        case WStype_PING:
-        case WStype_PONG:
         default:
             break;
     }
@@ -168,23 +206,25 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 // STATUS LED CONTROLLER (NON-BLOCKING)
 //  - Slow blink (500 ms) : Connecting to Wi-Fi
 //  - Fast blink (125 ms) : Wi-Fi OK, connecting to Render WSS
-//  - Solid ON            : Live streaming ECG packets
+//  - Solid ON + R-pulse  : Live streaming ECG packets (brief 35 ms dip per beat)
 // ============================================================================
 void updateStatusLed(bool wifiReady, bool serverReady) {
     static uint32_t lastToggleMs = 0;
     static bool     ledState     = false;
 
+    uint32_t now = millis();
+
     if (wifiReady && serverReady) {
-        if (!ledState) {
-            ledState = true;
-            digitalWrite(STATUS_LED_PIN, HIGH);
+        bool beatDip = (now - lastEdgeBeatMs) < 35;
+        bool desired = !beatDip;
+        if (ledState != desired) {
+            ledState = desired;
+            digitalWrite(STATUS_LED_PIN, ledState ? HIGH : LOW);
         }
         return;
     }
 
     uint32_t intervalMs = wifiReady ? 125 : 500;
-    uint32_t now        = millis();
-
     if (now - lastToggleMs >= intervalMs) {
         lastToggleMs = now;
         ledState     = !ledState;
@@ -199,10 +239,12 @@ void networkTask(void* pvParameters) {
     (void)pvParameters;
 
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false); // Disable modem sleep for low-latency 100 ms packet cadence
+    WiFi.setSleep(false);
 
     wifiMulti.addAP(WIFI_SSID_1, WIFI_PASS_1);
-    if (strlen(WIFI_SSID_2) > 0 && strcmp(WIFI_SSID_2, "YOUR_MOBILE_HOTSPOT_SSID") != 0) {
+    if (strlen(WIFI_SSID_2) > 0 &&
+        strcmp(WIFI_SSID_2, "YOUR_MOBILE_HOTSPOT_SSID") != 0 &&
+        strcmp(WIFI_SSID_2, "YOUR_BACKUP_HOTSPOT_SSID") != 0) {
         wifiMulti.addAP(WIFI_SSID_2, WIFI_PASS_2);
     }
 
@@ -215,22 +257,18 @@ void networkTask(void* pvParameters) {
     Serial.printf("[WIFI] Connected! IP: %s | RSSI: %d dBm\n",
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-    // Build authenticated WebSocket path: /ws/esp32?token=<HEARTIX_DEVICE_TOKEN>
     String wsPath = "/ws/esp32?token=";
     wsPath += DEVICE_TOKEN;
 
-    // Configure WSS (TLS on port 443)
-    // Note: beginSSL without root CA fingerprint enables standard TLS encryption
-    // compatible with Render's auto-renewing Let's Encrypt certificates.
     webSocket.beginSSL(RENDER_HOST, 443, wsPath.c_str());
     webSocket.onEvent(onWebSocketEvent);
     webSocket.setReconnectInterval(3000);
     webSocket.enableHeartbeat(15000, 3000, 2);
 
-    uint32_t packetsSentWindow  = 0;
-    uint32_t packetsDropWindow  = 0;
-    uint32_t lastDiagPrintMs    = millis();
-    bool     wasWifiConnected   = true;
+    uint32_t packetsSentWindow = 0;
+    uint32_t packetsBufWindow  = 0;
+    uint32_t lastDiagPrintMs   = millis();
+    bool     wasWifiConnected  = true;
 
     for (;;) {
         bool wifiOk = (wifiMulti.run() == WL_CONNECTED);
@@ -238,7 +276,7 @@ void networkTask(void* pvParameters) {
         if (wifiOk && !wasWifiConnected) {
             Serial.printf("[WIFI] Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
         } else if (!wifiOk && wasWifiConnected) {
-            Serial.println("[WIFI] Connection lost. Searching for AP...");
+            Serial.println("[WIFI] Connection lost. Buffering ECG in SRAM...");
             wsConnected = false;
         }
         wasWifiConnected = wifiOk;
@@ -247,41 +285,52 @@ void networkTask(void* pvParameters) {
             webSocket.loop();
         }
 
-        // Wait up to 10 ms for a completed 25-sample buffer from Core 1
+        // Collect new packet from Core 1 into offline SRAM ring buffer
         uint8_t readyIdx = 0;
         if (xQueueReceive(readyBufferQueue, &readyIdx, pdMS_TO_TICKS(10)) == pdTRUE) {
-            if (wifiOk && wsConnected) {
+            ringPush(txBuffers[readyIdx]);
+            if (!(wifiOk && wsConnected)) {
+                packetsBufWindow++;
+            }
+        }
+
+        // Drain up to 4 buffered packets per iteration when WSS is live
+        if (wifiOk && wsConnected && ringCount > 0) {
+            uint8_t sentThisTick = 0;
+            EcgBinaryPacket pktToSend;
+            while (ringCount > 0 && sentThisTick < 4) {
+                pktToSend = offlineRing[ringTail];
                 bool ok = webSocket.sendBIN(
-                    reinterpret_cast<uint8_t*>(&txBuffers[readyIdx]),
+                    reinterpret_cast<uint8_t*>(&pktToSend),
                     sizeof(EcgBinaryPacket)
                 );
                 if (ok) {
+                    ringPop(pktToSend);
                     packetsSentWindow++;
+                    sentThisTick++;
                 } else {
-                    packetsDropWindow++;
+                    break;
                 }
-            } else {
-                packetsDropWindow++;
             }
         }
 
         updateStatusLed(wifiOk, wsConnected);
 
-        // Clean 5-second diagnostic telemetry summary (never spams Serial at 250 Hz)
         uint32_t now = millis();
         if (now - lastDiagPrintMs >= 5000) {
             float pktRate = packetsSentWindow / 5.0f;
             Serial.printf(
-                "[TELEMETRY] WiFi=%s | WS=%s | Rate=%.1f pkt/s (target 10.0) | Sent=%lu | Dropped=%lu | Heap=%lu B\n",
+                "[TELEMETRY] WiFi=%s | WS=%s | Rate=%.1f pkt/s | Sent=%lu | Buffered=%lu (Queue=%u) | Heap=%lu B\n",
                 wifiOk ? "OK" : "DOWN",
                 wsConnected ? "LIVE" : "WAIT",
                 pktRate,
                 static_cast<unsigned long>(packetsSentWindow),
-                static_cast<unsigned long>(packetsDropWindow),
+                static_cast<unsigned long>(packetsBufWindow),
+                static_cast<unsigned int>(ringCount),
                 static_cast<unsigned long>(ESP.getFreeHeap())
             );
             packetsSentWindow = 0;
-            packetsDropWindow = 0;
+            packetsBufWindow  = 0;
             lastDiagPrintMs   = now;
         }
     }
@@ -306,7 +355,6 @@ void setup() {
 
     memset(txBuffers, 0, sizeof(txBuffers));
 
-    // Single 2-slot queue passing buffer index (0 or 1) from Core 1 -> Core 0
     readyBufferQueue = xQueueCreate(2, sizeof(uint8_t));
     if (readyBufferQueue == nullptr) {
         Serial.println("[FATAL] Failed to create FreeRTOS queue. Halting.");
@@ -315,30 +363,27 @@ void setup() {
         }
     }
 
-    // Pin deterministic 250 Hz ADC sampling to Core 1 (Application Core)
     xTaskCreatePinnedToCore(
         samplingTask,
         "EcgSamplingTask",
         4096,
         nullptr,
-        3,    // High priority for strict 4 ms timing
+        3,
         nullptr,
-        1     // Core 1
+        1
     );
 
-    // Pin Wi-Fi + TLS WebSocket stack to Core 0 (Protocol Core)
     xTaskCreatePinnedToCore(
         networkTask,
         "EcgNetworkTask",
-        8192, // Generous stack for mbedTLS / WSS handshake
+        12288, // 12 KB stack for mbedTLS / WSS handshake stability
         nullptr,
-        2,    // Priority 2
+        2,
         nullptr,
-        0     // Core 0
+        0
     );
 }
 
 void loop() {
-    // All work runs inside pinned FreeRTOS tasks; delete default loopTask to free RAM
     vTaskDelete(nullptr);
 }
