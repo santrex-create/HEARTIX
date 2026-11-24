@@ -121,7 +121,7 @@ body {
 .patient-strip {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
@@ -146,10 +146,21 @@ body {
   border-radius: 4px;
 }
 
+.observer-badge {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 800;
+  color: #05080D;
+  background: var(--clinical-cyan);
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+}
+
 .telemetry-badges-group {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -201,12 +212,30 @@ body {
   transition: width 0.25s ease, background-color 0.25s ease;
 }
 
+.share-link-btn {
+  background: var(--bg-panel-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--clinical-cyan);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.share-link-btn:hover {
+  border-color: var(--clinical-cyan);
+  background: var(--clinical-cyan-dim);
+}
+
 .hdr-clock {
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 700;
   color: var(--text-primary);
-  padding-left: 6px;
+  padding-left: 4px;
 }
 
 /* ==========================================================================
@@ -250,7 +279,6 @@ body {
   opacity: 0.9;
 }
 
-/* Alarm States */
 .alarm-banner.alarm-none {
   background: #080E17;
   color: var(--text-secondary);
@@ -323,7 +351,6 @@ body {
   min-height: 0;
 }
 
-/* LEFT ECG MONITOR PANEL */
 .ecg-panel {
   display: flex;
   flex-direction: column;
@@ -343,6 +370,8 @@ body {
   border-bottom: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
   font-size: 11px;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .lead-badge {
@@ -447,7 +476,7 @@ body {
 .parameters-panel {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 8px;
   min-height: 0;
   overflow-y: auto;
 }
@@ -456,7 +485,7 @@ body {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  padding: 10px 14px;
+  padding: 9px 13px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -483,7 +512,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 5px;
 }
 
 .card-title {
@@ -507,7 +536,25 @@ body {
   color: var(--text-secondary);
 }
 
-/* HR Readout */
+.mini-toggle-btn {
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-strong);
+  color: var(--clinical-cyan);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.mini-toggle-btn.active,
+.mini-toggle-btn:hover {
+  background: var(--clinical-cyan-dim);
+  border-color: var(--clinical-cyan);
+}
+
+/* HR Readout & Sparkline */
 .hr-readout-row {
   display: flex;
   align-items: baseline;
@@ -516,7 +563,7 @@ body {
 
 .hr-value {
   font-family: var(--font-mono);
-  font-size: 52px;
+  font-size: 46px;
   font-weight: 800;
   line-height: 1;
   color: var(--ecg-green);
@@ -527,11 +574,11 @@ body {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 4px;
+  gap: 3px;
 }
 
 .heart-icon {
-  font-size: 22px;
+  font-size: 20px;
   color: var(--ecg-green);
   opacity: 0.45;
   transform: scale(1);
@@ -546,37 +593,59 @@ body {
 
 .param-unit {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
   color: var(--ecg-green);
 }
 
-/* Dual Metrics (RR/HRV & QRS/ST) */
+.sparkline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sparkline-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.sparkline-canvas {
+  width: 100%;
+  height: 24px;
+  display: block;
+}
+
+/* Dual Metrics & Poincare */
 .dual-metric-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  gap: 8px;
 }
 
 .metric-cell {
   background: var(--bg-obsidian);
   border: 1px solid var(--border-subtle);
   border-radius: 4px;
-  padding: 7px 10px;
+  padding: 6px 9px;
   display: flex;
   flex-direction: column;
 }
 
 .metric-sublabel {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 9.5px;
   color: var(--text-muted);
-  margin-bottom: 3px;
+  margin-bottom: 2px;
 }
 
 .metric-value {
   font-family: var(--font-mono);
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   line-height: 1.15;
 }
@@ -589,13 +658,34 @@ body {
   color: var(--text-primary);
 }
 
-.amber-text {
-  color: var(--alert-amber) !important;
+.poincare-wrap {
+  margin-top: 8px;
+  background: var(--bg-obsidian);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 6px;
+}
+
+.poincare-header {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+#poincareCanvas {
+  width: 100%;
+  height: 110px;
+  display: block;
+  background: #04070B;
+  border-radius: 3px;
 }
 
 .st-status-pill {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
   padding: 2px 7px;
   border-radius: 3px;
@@ -612,15 +702,15 @@ body {
 /* AI Rhythm Card */
 .ai-status-pill {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.04em;
-  padding: 7px 10px;
+  padding: 6px 9px;
   border-radius: 4px;
   background: var(--bg-obsidian);
   border: 1px solid var(--border-strong);
   color: var(--text-primary);
-  margin-bottom: 6px;
+  margin-bottom: 5px;
 }
 
 .ai-status-pill.rhythm-normal {
@@ -642,24 +732,24 @@ body {
 }
 
 .ai-reason-text {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-secondary);
-  margin-bottom: 8px;
+  margin-bottom: 7px;
 }
 
 .rhythm-flags-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
   margin-top: auto;
 }
 
 .rhythm-flag {
   text-align: center;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
-  padding: 4px 4px;
+  padding: 4px 2px;
   border-radius: 3px;
   background: var(--bg-obsidian);
   border: 1px solid var(--border-subtle);
@@ -685,7 +775,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 6px 14px;
   background: #121722;
   border-top: 1px solid var(--alert-amber);
@@ -704,7 +794,7 @@ body {
 .lab-btn-group {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
 }
 
@@ -713,9 +803,9 @@ body {
   color: var(--text-primary);
   border: 1px solid var(--border-strong);
   border-radius: 4px;
-  padding: 4px 9px;
+  padding: 4px 8px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -743,13 +833,13 @@ body {
 }
 
 /* ==========================================================================
-   BOTTOM ICU SOFT-KEY CONTROL BAR
+   BOTTOM ICU SOFT-KEY CONTROL BAR (14 Soft-Keys)
    ========================================================================== */
 .softkey-bar {
   display: grid;
-  grid-template-columns: repeat(12, 1fr);
-  gap: 6px;
-  padding: 8px 14px;
+  grid-template-columns: repeat(14, 1fr);
+  gap: 5px;
+  padding: 7px 14px;
   background: var(--bg-panel);
   border-top: 1px solid var(--border-subtle);
   flex-shrink: 0;
@@ -764,19 +854,24 @@ body {
   border: 1px solid var(--border-strong);
   border-bottom: 3px solid #2D3E5C;
   border-radius: 5px;
-  padding: 6px 4px;
+  padding: 5px 3px;
   color: var(--text-primary);
   cursor: pointer;
   transition: background-color 0.14s ease, border-color 0.14s ease, transform 0.08s ease;
   user-select: none;
 }
 
-.softkey-btn:hover {
+.softkey-btn:hover:not(:disabled) {
   background: #172336;
   border-color: var(--clinical-cyan);
 }
 
-.softkey-btn:active {
+.softkey-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.softkey-btn:active:not(:disabled) {
   transform: translateY(1px);
 }
 
@@ -801,26 +896,28 @@ body {
 
 .sk-top {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
+  white-space: nowrap;
 }
 
 .sk-sub {
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 9px;
   color: var(--text-secondary);
   margin-top: 2px;
+  white-space: nowrap;
 }
 
 .event-badge {
   background: var(--alarm-red);
   color: #FFFFFF;
-  font-size: 10px;
-  padding: 0 5px;
+  font-size: 9.5px;
+  padding: 0 4px;
   border-radius: 9px;
   font-weight: 800;
 }
@@ -1103,7 +1200,7 @@ body {
 /* ==========================================================================
    RESPONSIVE BREAKPOINTS (Tablets & Phones)
    ========================================================================== */
-@media (max-width: 1120px) {
+@media (max-width: 1240px) {
   .monitor-shell {
     height: auto;
     min-height: 100vh;
@@ -1123,7 +1220,7 @@ body {
   }
 
   .softkey-bar {
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(7, 1fr);
   }
 }
 

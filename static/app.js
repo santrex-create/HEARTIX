@@ -1,11 +1,13 @@
 /**
  * HEARTIX — Phase 4: Live ECG Canvas, WebSocket Engine & Monitor Controls
- * Production-ready frontend controller managing WebSocket telemetry, 60 FPS sweeping ECG canvas,
- * clinical parameter cards, audio alarms, event logs, PDF reporting, and simulator controls.
+ * Continuous parameter visibility (no <60% SQI lockout), rolling baseline centering,
+ * 60-sec HR sparkline, Poincare R-R plot, 1 mV CAL pulse, PNG export, and observer links.
  */
 
 (function () {
   "use strict";
+
+  const urlParams = new URLSearchParams(window.location.search);
 
   // --- STATE MANAGEMENT ---
   const state = {
@@ -15,14 +17,18 @@
     monitoringStopped: false,
     frozen: false,
     leadsOff: false,
-    calibrating: false,
     validSignal: false,
-    
+    observerMode: urlParams.get("mode") === "observer",
+    adminPin: urlParams.get("pin") || "",
+    pinRequired: false,
+
     // Display configuration
     sweepSpeedMmPerSec: 25, // 25 or 50 mm/s
     gainMode: "AUTO",       // "AUTO", "1X", "2X"
+    calPulseOn: true,
     qrsBeepOn: true,
-    
+    poincareVisible: false,
+
     // Patient Data
     patient: {
       name: "UNASSIGNED PATIENT",
@@ -50,28 +56,25 @@
       bradycardia: false,
       tachycardia: false,
       arrhythmia: false,
+      pvcCount: 0,
       eventCount: 0,
-      alarmLevel: "none",
-      alarmText: "SYSTEM STANDBY — NO ACTIVE CLINICAL ALARMS",
-      alarmReason: "Awaiting physiological telemetry stream"
+      alarmLevel: "none"
     },
 
     // ECG Sample Buffers (250 Hz sample rate)
-    // 25 mm/s = 5 seconds = 1250 samples; 50 mm/s = 2.5 seconds = 625 samples
-    ecgBuffer: [], // objects: { sample: number, rPeak: boolean, timestamp: number }
-    renderHead: 0, // current pixel or index write head
-    
-    // Rolling 10-second ring buffer (2500 samples) for PDF printing & snapshot review
+    ecgBuffer: [],
     rollingPrintBuffer: [],
-    
-    // Incoming sample queue for smooth 60 FPS rendering
     sampleQueue: [],
-    
+
+    // Trend & Poincare buffers
+    hrHistory: [],
+    rrHistory: [],
+
     // WebSocket reconnection state
     ws: null,
     reconnectAttempt: 0,
     reconnectTimer: null,
-    
+
     // Events log cache
     eventsListCache: []
   };
@@ -81,14 +84,17 @@
 
   function cacheDomElements() {
     const ids = [
-      "hdrPatientName", "hdrPatientMeta", "hdrPatientId", "badgeServer", "badgeEsp32",
-      "badgePacketLoss", "badgeSqi", "sqiBarFill", "hdrClock",
+      "hdrPatientName", "hdrPatientMeta", "hdrPatientId", "observerBadge",
+      "badgeServer", "badgeEsp32", "badgePacketLoss", "badgeSqi", "sqiBarFill",
+      "btnShareObserver", "hdrClock",
       "alarmBanner", "alarmText", "alarmReason", "simWatermark",
       "ecgCanvas", "metaSpeedGain", "metaSource", "canvasOverlay", "canvasOverlayTitle", "canvasOverlaySub", "frozenBadge",
-      "heartIcon", "valBpm", "valHrLimits", "valRr", "valHrv", "valQrs", "valSt", "valStStatus",
-      "aiStatusPill", "valAiConfidence", "valAiReason", "flagBrady", "flagTachy", "flagArrhythmia",
-      "btnFreeze", "btnStop", "btnReset", "btnSaveCsv", "btnPdfReport", "btnMuteAlarms",
-      "btnQrsBeep", "btnSpeed", "btnGain", "btnEvents", "eventCountBadge", "btnPatient", "btnLabTest",
+      "heartIcon", "valBpm", "valHrLimits", "hrSparklineCanvas",
+      "valRr", "valHrv", "btnTogglePoincare", "poincareWrap", "poincareCanvas",
+      "valQrs", "valSt", "valStStatus",
+      "aiStatusPill", "valAiConfidence", "valAiReason", "flagBrady", "flagTachy", "flagArrhythmia", "flagPvc",
+      "btnFreeze", "btnStop", "btnReset", "btnSaveCsv", "btnSavePng", "btnPdfReport", "btnMuteAlarms",
+      "btnQrsBeep", "btnSpeed", "btnGain", "btnCalPulse", "btnEvents", "eventCountBadge", "btnPatient", "btnLabTest",
       "labTestBar", "btnSimStop",
       "patientModal", "patientForm", "inpPatientName", "inpPatientAge", "inpPatientGender",
       "inpPatientId", "inpPatientBed", "inpMinHr", "inpMaxHr", "inpNotes", "btnStartMonitoring", "btnGuestMode",
@@ -96,7 +102,7 @@
       "printReportContainer", "printPatientInfo", "printEcgCanvas", "printMetricsTable", "printEventsTable", "printTimestamp"
     ];
 
-    ids.forEach(id => {
+    ids.forEach((id) => {
       DOM[id] = document.getElementById(id);
     });
   }
@@ -104,6 +110,7 @@
   // --- INITIALIZATION & CLOCK ---
   window.addEventListener("DOMContentLoaded", () => {
     cacheDomElements();
+    applyObserverPermissions();
     initPatientIdPlaceholder();
     initClock();
     initWebSocket();
@@ -111,6 +118,23 @@
     initCanvasResize();
     requestAnimationFrame(renderLoop);
   });
+
+  function applyObserverPermissions() {
+    if (!state.observerMode) return;
+    if (DOM.observerBadge) DOM.observerBadge.classList.remove("hidden");
+    if (DOM.patientModal) DOM.patientModal.classList.add("hidden");
+    if (DOM.btnReset) DOM.btnReset.disabled = true;
+    if (DOM.btnPatient) DOM.btnPatient.disabled = true;
+    if (DOM.btnLabTest) DOM.btnLabTest.disabled = true;
+  }
+
+  function ensureAdminPin() {
+    if (!state.pinRequired || state.adminPin) return true;
+    const entered = window.prompt("Enter HEARTIX Admin PIN to unlock bedside controls:");
+    if (!entered) return false;
+    state.adminPin = entered.trim();
+    return Boolean(state.adminPin);
+  }
 
   function initPatientIdPlaceholder() {
     if (DOM.inpPatientId && !DOM.inpPatientId.value) {
@@ -123,7 +147,10 @@
     setInterval(() => {
       const now = new Date();
       if (DOM.hdrClock) {
-        DOM.hdrClock.textContent = now.toTimeString().split(" ")[0] + "." + String(now.getMilliseconds()).padStart(3, "0").slice(0, 2);
+        DOM.hdrClock.textContent =
+          now.toTimeString().split(" ")[0] +
+          "." +
+          String(now.getMilliseconds()).padStart(3, "0").slice(0, 2);
       }
     }, 50);
   }
@@ -131,7 +158,9 @@
   // --- WEBSOCKET ENGINE WITH EXPONENTIAL BACKOFF ---
   function initWebSocket() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${proto}//${location.host}/ws/web`;
+    const modeParam = state.observerMode ? "observer" : "operator";
+    const pinParam = state.adminPin ? `&pin=${encodeURIComponent(state.adminPin)}` : "";
+    const wsUrl = `${proto}//${location.host}/ws/web?mode=${modeParam}${pinParam}`;
 
     if (DOM.badgeServer) {
       DOM.badgeServer.textContent = "CONNECTING";
@@ -163,9 +192,10 @@
       scheduleReconnect();
     };
 
-    state.ws.onerror = (err) => {
-      console.error("WebSocket error:", err);
-      try { state.ws.close(); } catch (e) {}
+    state.ws.onerror = () => {
+      try {
+        state.ws.close();
+      } catch (e) {}
     };
   }
 
@@ -212,8 +242,13 @@
       case "state":
         state.esp32Connected = Boolean(msg.esp32_connected);
         state.simMode = Boolean(msg.sim_mode);
+        state.pinRequired = Boolean(msg.pin_required);
+        if (msg.observer_mode) {
+          state.observerMode = true;
+          applyObserverPermissions();
+        }
         updateEsp32Badge(state.esp32Connected);
-        
+
         if (DOM.badgePacketLoss && msg.packet_loss_pct !== undefined) {
           DOM.badgePacketLoss.textContent = Number(msg.packet_loss_pct).toFixed(1) + "%";
         }
@@ -229,18 +264,22 @@
       case "ecg_batch":
         if (state.monitoringStopped) return;
         state.leadsOff = Boolean(msg.leads_off);
-        state.calibrating = Boolean(msg.calibrating);
-        
+
         if (msg.source && DOM.metaSource) {
           DOM.metaSource.textContent = `SOURCE: ${String(msg.source).toUpperCase()}`;
         }
 
         if (Array.isArray(msg.samples)) {
-          const rPeaks = Array.isArray(msg.r_peak_offsets) ? msg.r_peak_offsets : [];
+          // r_peak_offsets contains sample indices within the 25-sample batch (e.g., [14])
+          const rPeakSet = new Set(Array.isArray(msg.r_peak_offsets) ? msg.r_peak_offsets : []);
           for (let i = 0; i < msg.samples.length; i++) {
             const sampleVal = msg.samples[i];
-            const isRPeak = Boolean(rPeaks[i]);
-            state.sampleQueue.push({ sample: sampleVal, rPeak: isRPeak, timestamp: Date.now() });
+            const isRPeak = rPeakSet.has(i);
+            state.sampleQueue.push({
+              sample: sampleVal,
+              rPeak: isRPeak,
+              timestamp: Date.now()
+            });
           }
         }
         evaluateSystemState();
@@ -261,7 +300,7 @@
 
   function sendWsCommand(action, payload = {}) {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-      state.ws.send(JSON.stringify({ action, ...payload }));
+      state.ws.send(JSON.stringify({ action, pin: state.adminPin, ...payload }));
     }
   }
 
@@ -285,8 +324,8 @@
     if (isOfflineOrStopped) {
       if (DOM.canvasOverlay) DOM.canvasOverlay.classList.remove("hidden");
       if (DOM.canvasOverlayTitle) {
-        DOM.canvasOverlayTitle.textContent = state.monitoringStopped 
-          ? "MONITORING STOPPED" 
+        DOM.canvasOverlayTitle.textContent = state.monitoringStopped
+          ? "MONITORING STOPPED"
           : "ESP32 NOT CONNECTED — POWER ON HEARTIX DEVICE TO BEGIN";
       }
       if (DOM.canvasOverlaySub) {
@@ -295,7 +334,6 @@
           : "Verify USB-Serial / WebSocket telemetry bridge or enable Lab Test Mode below";
       }
 
-      // Blank metrics
       blankAllMetrics();
       if (window.heartixAudio) {
         window.heartixAudio.setAlarmLevel("none");
@@ -304,35 +342,32 @@
       return;
     }
 
-    if (state.leadsOff || state.calibrating || !state.validSignal) {
+    // Only block display when hardware leads are physically detached (LO+ / LO- HIGH).
+    // Never hide parameters for SQI < 60% or calibration states.
+    if (state.leadsOff) {
       if (DOM.canvasOverlay) DOM.canvasOverlay.classList.remove("hidden");
       if (DOM.canvasOverlayTitle) {
-        DOM.canvasOverlayTitle.textContent = state.leadsOff 
-          ? "LEADS OFF — CHECK ELECTRODE CONTACT" 
-          : state.calibrating ? "CALIBRATING SENSOR..." : "LOW SIGNAL QUALITY (SQI < 60%)";
+        DOM.canvasOverlayTitle.textContent = "LEADS OFF — CHECK ELECTRODE CONTACT";
       }
       if (DOM.canvasOverlaySub) {
-        DOM.canvasOverlaySub.textContent = "Ensure patient electrodes and leads II placement are secure.";
+        DOM.canvasOverlaySub.textContent = "Ensure patient electrodes and Lead II placement are secure.";
       }
 
       blankDerivedMetrics();
-      if (state.leadsOff) {
-        if (window.heartixAudio) {
-          window.heartixAudio.triggerTechnicalAlert();
-          window.heartixAudio.setAlarmLevel("technical");
-        }
-        updateAlarmBanner("technical", "TECHNICAL ALERT — LEADS OFF / POOR CONTACT", "Verify Lead II ECG electrode impedance");
+      if (window.heartixAudio) {
+        window.heartixAudio.triggerTechnicalAlert();
+        window.heartixAudio.setAlarmLevel("technical");
       }
+      updateAlarmBanner("technical", "TECHNICAL ALERT — LEADS OFF / POOR CONTACT", "Verify Lead II ECG electrode impedance");
       return;
     }
 
-    // Normal valid signal stream
     if (DOM.canvasOverlay) DOM.canvasOverlay.classList.add("hidden");
   }
 
   function blankAllMetrics() {
     const ids = ["valBpm", "valRr", "valHrv", "valQrs", "valSt", "badgeSqi", "valAiConfidence"];
-    ids.forEach(id => {
+    ids.forEach((id) => {
       if (DOM[id]) DOM[id].textContent = "---";
     });
     if (DOM.sqiBarFill) DOM.sqiBarFill.style.width = "0%";
@@ -347,8 +382,8 @@
   }
 
   function blankDerivedMetrics() {
-    const ids = ["valRr", "valHrv", "valQrs", "valSt", "badgeSqi", "valAiConfidence"];
-    ids.forEach(id => {
+    const ids = ["valBpm", "valRr", "valHrv", "valQrs", "valSt", "badgeSqi", "valAiConfidence"];
+    ids.forEach((id) => {
       if (DOM[id]) DOM[id].textContent = "---";
     });
     if (DOM.sqiBarFill) DOM.sqiBarFill.style.width = "0%";
@@ -356,7 +391,7 @@
   }
 
   function resetRhythmFlags() {
-    ["flagBrady", "flagTachy", "flagArrhythmia"].forEach(id => {
+    ["flagBrady", "flagTachy", "flagArrhythmia", "flagPvc"].forEach((id) => {
       if (DOM[id]) DOM[id].className = "rhythm-flag";
     });
   }
@@ -371,32 +406,65 @@
   function updateMetricsDisplay(m) {
     state.validSignal = Boolean(m.valid_signal);
 
-    if (DOM.valBpm) DOM.valBpm.textContent = m.bpm !== undefined && m.bpm !== null ? m.bpm : "---";
-    if (DOM.valRr) DOM.valRr.textContent = m.rr_ms !== undefined && m.rr_ms !== null ? m.rr_ms : "---";
-    if (DOM.valHrv) DOM.valHrv.textContent = m.hrv_ms !== undefined && m.hrv_ms !== null ? m.hrv_ms : "---";
-    if (DOM.valQrs) DOM.valQrs.textContent = m.qrs_ms !== undefined && m.qrs_ms !== null ? m.qrs_ms : "---";
-    
+    if (DOM.valBpm) {
+      DOM.valBpm.textContent = m.bpm !== undefined && m.bpm !== null ? m.bpm : "---";
+    }
+    if (DOM.valRr) {
+      DOM.valRr.textContent = m.rr_ms !== undefined && m.rr_ms !== null ? m.rr_ms : "---";
+    }
+    if (DOM.valHrv) {
+      DOM.valHrv.textContent = m.hrv_ms !== undefined && m.hrv_ms !== null ? m.hrv_ms : "---";
+    }
+    if (DOM.valQrs) {
+      DOM.valQrs.textContent = m.qrs_ms !== undefined && m.qrs_ms !== null ? m.qrs_ms : "---";
+    }
+
     if (DOM.valSt) {
-      const stVal = m.st_mv !== undefined && m.st_mv !== null ? Number(m.st_mv).toFixed(2) : "---";
-      DOM.valSt.textContent = (stVal > 0 ? "+" : "") + stVal;
+      if (m.st_mv !== undefined && m.st_mv !== null) {
+        const stNum = Number(m.st_mv);
+        DOM.valSt.textContent = (stNum > 0 ? "+" : "") + stNum.toFixed(2);
+      } else {
+        DOM.valSt.textContent = "---";
+      }
     }
 
     if (DOM.valStStatus) {
       DOM.valStStatus.textContent = m.st_status || "Screening";
-      if (m.st_status && m.st_status.toLowerCase().includes("elevation")) {
+      if (
+        m.st_status &&
+        (m.st_status.toLowerCase().includes("elevat") || m.st_status.toLowerCase().includes("depress"))
+      ) {
         DOM.valStStatus.className = "st-status-pill st-alert";
       } else {
         DOM.valStStatus.className = "st-status-pill";
       }
     }
 
-    if (DOM.badgeSqi && m.sqi !== undefined) {
+    // Passive Color-Coded SQI Indicator (never gates parameter display)
+    if (DOM.badgeSqi && m.sqi !== undefined && m.sqi !== null) {
       const sqiNum = Number(m.sqi);
       DOM.badgeSqi.textContent = Math.round(sqiNum) + "%";
       if (DOM.sqiBarFill) {
         DOM.sqiBarFill.style.width = Math.min(Math.max(sqiNum, 0), 100) + "%";
-        DOM.sqiBarFill.style.backgroundColor = sqiNum < 60 ? "var(--alarm-red)" : sqiNum < 80 ? "var(--alert-amber)" : "var(--ecg-green)";
+        DOM.sqiBarFill.style.backgroundColor =
+          sqiNum < 40
+            ? "var(--alarm-red)"
+            : sqiNum < 75
+              ? "var(--alert-amber)"
+              : "var(--ecg-green)";
       }
+    }
+
+    // Update 60s HR sparkline and Poincare RR buffers
+    if (m.bpm !== undefined && m.bpm !== null && Number(m.bpm) > 0) {
+      state.hrHistory.push(Number(m.bpm));
+      if (state.hrHistory.length > 60) state.hrHistory.shift();
+      drawHrSparkline();
+    }
+    if (m.rr_ms !== undefined && m.rr_ms !== null && Number(m.rr_ms) > 0) {
+      state.rrHistory.push(Number(m.rr_ms));
+      if (state.rrHistory.length > 45) state.rrHistory.shift();
+      if (state.poincareVisible) drawPoincarePlot();
     }
 
     // AI Classification
@@ -405,9 +473,18 @@
       const lowerLbl = String(m.ai_label).toLowerCase();
       if (lowerLbl.includes("normal") || lowerLbl.includes("sinus rhythm")) {
         DOM.aiStatusPill.className = "ai-status-pill rhythm-normal";
-      } else if (lowerLbl.includes("tachy") || lowerLbl.includes("brady") || lowerLbl.includes("st elevation")) {
+      } else if (
+        lowerLbl.includes("tachy") ||
+        lowerLbl.includes("brady") ||
+        lowerLbl.includes("st segment") ||
+        lowerLbl.includes("artifact")
+      ) {
         DOM.aiStatusPill.className = "ai-status-pill rhythm-warning";
-      } else if (lowerLbl.includes("fibrillation") || lowerLbl.includes("arrhythmia") || lowerLbl.includes("vtach")) {
+      } else if (
+        lowerLbl.includes("fibrillation") ||
+        lowerLbl.includes("arrhythmia") ||
+        lowerLbl.includes("vtach")
+      ) {
         DOM.aiStatusPill.className = "ai-status-pill rhythm-critical";
       } else {
         DOM.aiStatusPill.className = "ai-status-pill";
@@ -432,30 +509,45 @@
     if (DOM.flagArrhythmia) {
       DOM.flagArrhythmia.className = m.arrhythmia ? "rhythm-flag flag-active-red" : "rhythm-flag";
     }
+    if (DOM.flagPvc) {
+      const hasPvc = Number(m.pvc_count || 0) > 0;
+      DOM.flagPvc.className = hasPvc ? "rhythm-flag flag-active-amber" : "rhythm-flag";
+      DOM.flagPvc.textContent = hasPvc ? `PVC (${m.pvc_count})` : "PVC";
+    }
 
-    // Event count badge
     if (DOM.eventCountBadge && m.event_count !== undefined) {
       DOM.eventCountBadge.textContent = m.event_count;
     }
 
-    // Audio Alarms
+    // Audio Alarms & Banner
     if (m.alarm_level && window.heartixAudio) {
       window.heartixAudio.setAlarmLevel(m.alarm_level);
-      updateAlarmBanner(m.alarm_level, m.status || "CLINICAL ALARM ACTIVE", m.ai_reason || "Physiological abnormality detected");
+      const bannerTitle =
+        m.alarm_level === "none"
+          ? `MONITORING ACTIVE — ${m.ai_label || "SINUS RHYTHM"}`
+          : m.status || "CLINICAL ALARM ACTIVE";
+      updateAlarmBanner(
+        m.alarm_level,
+        bannerTitle,
+        m.ai_reason || "Real-time telemetry active"
+      );
     }
   }
 
   function resetEcgBuffers() {
     state.ecgBuffer = [];
-    state.renderHead = 0;
     state.sampleQueue = [];
     state.rollingPrintBuffer = [];
+    state.hrHistory = [];
+    state.rrHistory = [];
+    drawHrSparkline();
+    if (state.poincareVisible) drawPoincarePlot();
   }
 
   function syncPatientData(p) {
     if (!p) return;
     state.patient.name = p.name || state.patient.name;
-    state.patient.age = p.age !== undefined ? p.age : state.patient.age;
+    state.patient.age = p.age !== undefined && p.age !== null ? p.age : state.patient.age;
     state.patient.gender = p.gender || state.patient.gender;
     state.patient.id = p.patient_id || state.patient.id;
     state.patient.bed = p.bed || state.patient.bed;
@@ -464,7 +556,9 @@
     state.patient.notes = p.notes || state.patient.notes;
 
     if (DOM.hdrPatientName) DOM.hdrPatientName.textContent = state.patient.name.toUpperCase();
-    if (DOM.hdrPatientMeta) DOM.hdrPatientMeta.textContent = `${state.patient.age} yrs | ${state.patient.gender} | Bed ${state.patient.bed}`;
+    if (DOM.hdrPatientMeta) {
+      DOM.hdrPatientMeta.textContent = `${state.patient.age} yrs | ${state.patient.gender} | Bed ${state.patient.bed}`;
+    }
     if (DOM.hdrPatientId) DOM.hdrPatientId.textContent = `ID: ${state.patient.id}`;
     if (DOM.valHrLimits) DOM.valHrLimits.textContent = `${state.patient.minHr}–${state.patient.maxHr}`;
   }
@@ -490,12 +584,18 @@
     DOM.ecgCanvas.style.height = height + "px";
 
     const ctx = DOM.ecgCanvas.getContext("2d");
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
   function renderLoop() {
     drawEcgCanvas();
     requestAnimationFrame(renderLoop);
+  }
+
+  function computeRollingBaseline(samples) {
+    if (!samples || samples.length === 0) return 0;
+    const sorted = samples.map((p) => p.sample).sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
   }
 
   function drawEcgCanvas() {
@@ -506,15 +606,12 @@
     const width = canvas.width / dpr;
     const height = canvas.height / dpr;
 
-    // 1. Clear background & draw ECG grid
     ctx.fillStyle = "#04070B";
     ctx.fillRect(0, 0, width, height);
 
     drawEcgGrid(ctx, width, height);
 
-    // 2. Process incoming sample queue into buffer
     if (!state.frozen && !state.monitoringStopped && state.sampleQueue.length > 0) {
-      // Consume up to 8 samples per frame to maintain real-time sync without backlog lag
       const batchSize = Math.min(state.sampleQueue.length, 8);
       for (let i = 0; i < batchSize; i++) {
         const item = state.sampleQueue.shift();
@@ -523,61 +620,71 @@
         if (state.rollingPrintBuffer.length > 2500) {
           state.rollingPrintBuffer.shift();
         }
+        if (item.rPeak && !state.leadsOff) {
+          triggerHeartBeatFx();
+        }
       }
     }
 
-    const maxPoints = state.sweepSpeedMmPerSec === 50 ? 625 : 1250; // 250 Hz * 2.5s or 5.0s
+    const maxPoints = state.sweepSpeedMmPerSec === 50 ? 625 : 1250;
     if (state.ecgBuffer.length > maxPoints) {
       state.ecgBuffer = state.ecgBuffer.slice(state.ecgBuffer.length - maxPoints);
     }
 
-    if (state.ecgBuffer.length < 2) return;
+    // Auto-center baseline via rolling median
+    const baselineOffset = computeRollingBaseline(state.ecgBuffer);
 
-    // 3. Determine vertical scaling (Gain)
-    let scaleY = height * 0.18; // default 1x
-    if (state.gainMode === "2X") scaleY *= 2;
-    if (state.gainMode === "AUTO") {
-      // Auto-scale based on peak amplitudes in buffer
-      let maxAbs = 1.0;
+    // Determine vertical scaling (Gain)
+    let scaleY = height * 0.22; // 1X (10 mm/mV equivalent)
+    if (state.gainMode === "2X") {
+      scaleY *= 2.0;
+    } else if (state.gainMode === "AUTO" && state.ecgBuffer.length > 1) {
+      let maxAbs = 0.6;
       for (let p of state.ecgBuffer) {
-        if (Math.abs(p.sample) > maxAbs) maxAbs = Math.abs(p.sample);
+        const dev = Math.abs(p.sample - baselineOffset);
+        if (dev > maxAbs) maxAbs = dev;
       }
-      scaleY = (height * 0.38) / Math.max(maxAbs, 0.5);
+      scaleY = (height * 0.38) / Math.max(maxAbs, 0.35);
     }
 
     const centerY = height / 2;
-    const dx = width / maxPoints;
 
-    // 4. Draw sweeping ECG trace
+    // Draw standard 1.0 mV calibration square-wave pulse on left edge
+    if (state.calPulseOn) {
+      drawCalibrationPulse(ctx, centerY, scaleY);
+    }
+
+    if (state.ecgBuffer.length < 2) return;
+
+    const plotStartX = state.calPulseOn ? 38 : 0;
+    const plotWidth = Math.max(50, width - plotStartX);
+    const dx = plotWidth / maxPoints;
+
+    // Draw sweeping ECG trace
     ctx.lineWidth = 2.0;
-    ctx.strokeStyle = "#00E676"; // Hospital Green
+    ctx.strokeStyle = "#00E676";
     ctx.shadowColor = "rgba(0, 230, 118, 0.55)";
     ctx.shadowBlur = 6;
 
     ctx.beginPath();
     for (let i = 0; i < state.ecgBuffer.length; i++) {
       const pt = state.ecgBuffer[i];
-      const x = i * dx;
-      const y = centerY - (pt.sample * scaleY);
+      const x = plotStartX + i * dx;
+      const y = centerY - (pt.sample - baselineOffset) * scaleY;
 
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
-
-      // Trigger QRS beep & heart pulse if R-peak is encountered near write head
-      if (pt.rPeak && !state.frozen && state.validSignal && i === state.ecgBuffer.length - 1) {
-        triggerHeartBeatFx();
-      }
     }
     ctx.stroke();
-    ctx.shadowBlur = 0; // reset shadow
+    ctx.shadowBlur = 0;
 
-    // 5. Draw R-peak markers (small cyan/red triangles above R peaks)
+    // Draw R-peak markers (small cyan triangles above R peaks)
     ctx.fillStyle = "#38BDF8";
     for (let i = 0; i < state.ecgBuffer.length; i++) {
       const pt = state.ecgBuffer[i];
       if (pt.rPeak) {
-        const x = i * dx;
-        const y = centerY - (pt.sample * scaleY) - 14;
+        const x = plotStartX + i * dx;
+        const y = Math.max(12, centerY - (pt.sample - baselineOffset) * scaleY - 12);
         ctx.beginPath();
         ctx.moveTo(x, y);
         ctx.lineTo(x - 4, y - 6);
@@ -587,41 +694,134 @@
       }
     }
 
-    // 6. Draw moving eraser/sweep head bar if not frozen
+    // Draw moving sweep bar
     if (!state.frozen && !state.monitoringStopped) {
-      const headX = (state.ecgBuffer.length - 1) * dx;
+      const headX = plotStartX + (state.ecgBuffer.length - 1) * dx;
       ctx.fillStyle = "rgba(0, 230, 118, 0.35)";
       ctx.fillRect(headX, 0, 4, height);
     }
   }
 
+  function drawCalibrationPulse(ctx, centerY, scaleY) {
+    const pulseHeight = 1.0 * scaleY; // 1.0 mV height
+    ctx.save();
+    ctx.strokeStyle = "#38BDF8";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(6, centerY);
+    ctx.lineTo(12, centerY);
+    ctx.lineTo(12, centerY - pulseHeight);
+    ctx.lineTo(26, centerY - pulseHeight);
+    ctx.lineTo(26, centerY);
+    ctx.lineTo(32, centerY);
+    ctx.stroke();
+
+    ctx.fillStyle = "#64748B";
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.fillText("1mV", 9, centerY + 12);
+    ctx.restore();
+  }
+
   function drawEcgGrid(ctx, width, height) {
-    const minorSize = 5; // mm approx pixels
+    const minorSize = 5;
     const majorSize = 25;
 
-    // Minor grid lines
     ctx.strokeStyle = "rgba(10, 30, 20, 0.4)";
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     for (let x = 0; x < width; x += minorSize) {
-      ctx.moveTo(x, 0); ctx.lineTo(x, height);
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
     }
     for (let y = 0; y < height; y += minorSize) {
-      ctx.moveTo(0, y); ctx.lineTo(width, y);
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
     }
     ctx.stroke();
 
-    // Major grid lines
     ctx.strokeStyle = "rgba(18, 60, 40, 0.65)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = 0; x < width; x += majorSize) {
-      ctx.moveTo(x, 0); ctx.lineTo(x, height);
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
     }
     for (let y = 0; y < height; y += majorSize) {
-      ctx.moveTo(0, y); ctx.lineTo(width, y);
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
     }
     ctx.stroke();
+  }
+
+  function drawHrSparkline() {
+    const canvas = DOM.hrSparklineCanvas;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 200;
+    const h = canvas.clientHeight || 24;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    ctx.clearRect(0, 0, w, h);
+    if (state.hrHistory.length < 2) return;
+
+    const minVal = Math.max(30, Math.min(...state.hrHistory) - 5);
+    const maxVal = Math.min(220, Math.max(...state.hrHistory) + 5);
+    const span = Math.max(10, maxVal - minVal);
+    const dx = w / Math.max(59, state.hrHistory.length - 1);
+
+    ctx.strokeStyle = "#00E676";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    state.hrHistory.forEach((bpm, idx) => {
+      const x = idx * dx;
+      const y = h - 3 - ((bpm - minVal) / span) * (h - 6);
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  function drawPoincarePlot() {
+    const canvas = DOM.poincareCanvas;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 240;
+    const h = canvas.clientHeight || 110;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    ctx.fillStyle = "#04070B";
+    ctx.fillRect(0, 0, w, h);
+
+    // Line of identity (RR[n] == RR[n+1])
+    ctx.strokeStyle = "rgba(100, 116, 139, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(8, h - 8);
+    ctx.lineTo(w - 8, 8);
+    ctx.stroke();
+
+    if (state.rrHistory.length < 2) return;
+
+    const minRr = 300;
+    const maxRr = 1500;
+    const mapX = (rr) => 8 + ((Math.min(Math.max(rr, minRr), maxRr) - minRr) / (maxRr - minRr)) * (w - 16);
+    const mapY = (rr) => h - 8 - ((Math.min(Math.max(rr, minRr), maxRr) - minRr) / (maxRr - minRr)) * (h - 16);
+
+    for (let i = 0; i < state.rrHistory.length - 1; i++) {
+      const x = mapX(state.rrHistory[i]);
+      const y = mapY(state.rrHistory[i + 1]);
+      const isLatest = i === state.rrHistory.length - 2;
+      ctx.fillStyle = isLatest ? "#00E676" : "rgba(56, 189, 248, 0.75)";
+      ctx.beginPath();
+      ctx.arc(x, y, isLatest ? 3.5 : 2.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   function triggerHeartBeatFx() {
@@ -636,13 +836,75 @@
     }
   }
 
+  function updateMetaChip() {
+    if (DOM.metaSpeedGain) {
+      DOM.metaSpeedGain.textContent = `${state.sweepSpeedMmPerSec} mm/s | GAIN: ${state.gainMode}`;
+    }
+  }
+
+  function saveCanvasPngSnapshot() {
+    if (!DOM.ecgCanvas) return;
+    const exportCanvas = document.createElement("canvas");
+    exportCanvas.width = DOM.ecgCanvas.width;
+    exportCanvas.height = DOM.ecgCanvas.height + 44;
+    const ctx = exportCanvas.getContext("2d");
+
+    ctx.fillStyle = "#0B111B";
+    ctx.fillRect(0, 0, exportCanvas.width, 44);
+    ctx.fillStyle = "#F1F5F9";
+    ctx.font = 'bold 14px "JetBrains Mono", monospace';
+    const bpmTxt = DOM.valBpm ? DOM.valBpm.textContent : "---";
+    const sqiTxt = DOM.badgeSqi ? DOM.badgeSqi.textContent : "---";
+    const aiTxt = DOM.aiStatusPill ? DOM.aiStatusPill.textContent : "---";
+    ctx.fillText(
+      `HEARTIX ECG | ${state.patient.name} (${state.patient.id}) | HR: ${bpmTxt} BPM | SQI: ${sqiTxt} | ${aiTxt} | ${new Date().toLocaleTimeString()}`,
+      14,
+      27
+    );
+
+    ctx.drawImage(DOM.ecgCanvas, 0, 44);
+
+    const link = document.createElement("a");
+    link.download = `heartix_ecg_${Date.now()}.png`;
+    link.href = exportCanvas.toDataURL("image/png");
+    link.click();
+  }
+
   // --- CONTROLS & SOFT-KEY EVENT LISTENERS ---
   function initEventListeners() {
+    // Share Read-Only Observer URL
+    if (DOM.btnShareObserver) {
+      DOM.btnShareObserver.addEventListener("click", async () => {
+        const shareUrl = `${location.origin}/?mode=observer`;
+        try {
+          await navigator.clipboard.writeText(shareUrl);
+          DOM.btnShareObserver.textContent = "LINK COPIED!";
+          setTimeout(() => {
+            DOM.btnShareObserver.textContent = "SHARE VIEW";
+          }, 2000);
+        } catch (err) {
+          window.prompt("Copy read-only observer link:", shareUrl);
+        }
+      });
+    }
+
+    // Poincare Toggle
+    if (DOM.btnTogglePoincare) {
+      DOM.btnTogglePoincare.addEventListener("click", () => {
+        state.poincareVisible = !state.poincareVisible;
+        DOM.btnTogglePoincare.classList.toggle("active", state.poincareVisible);
+        if (DOM.poincareWrap) {
+          DOM.poincareWrap.classList.toggle("hidden", !state.poincareVisible);
+        }
+        if (state.poincareVisible) drawPoincarePlot();
+      });
+    }
+
     // 1. Freeze
     if (DOM.btnFreeze) {
       DOM.btnFreeze.addEventListener("click", () => {
         state.frozen = !state.frozen;
-        if (DOM.btnFreeze) DOM.btnFreeze.classList.toggle("active", state.frozen);
+        DOM.btnFreeze.classList.toggle("active", state.frozen);
         if (DOM.frozenBadge) DOM.frozenBadge.classList.toggle("hidden", !state.frozen);
       });
     }
@@ -651,7 +913,7 @@
     if (DOM.btnStop) {
       DOM.btnStop.addEventListener("click", () => {
         state.monitoringStopped = !state.monitoringStopped;
-        if (DOM.btnStop) DOM.btnStop.classList.toggle("active", state.monitoringStopped);
+        DOM.btnStop.classList.toggle("active", state.monitoringStopped);
         evaluateSystemState();
       });
     }
@@ -659,8 +921,15 @@
     // 3. Reset Session
     if (DOM.btnReset) {
       DOM.btnReset.addEventListener("click", async () => {
+        if (state.observerMode || !ensureAdminPin()) return;
         try {
-          await fetch("/api/session/reset", { method: "POST" });
+          const headers = state.adminPin ? { "X-Admin-Pin": state.adminPin } : {};
+          const res = await fetch("/api/session/reset", { method: "POST", headers });
+          if (res.status === 403) {
+            state.adminPin = "";
+            alert("Invalid Admin PIN.");
+            return;
+          }
           resetEcgBuffers();
         } catch (err) {
           console.error("Failed to reset session:", err);
@@ -668,19 +937,17 @@
       });
     }
 
-    // 4. Sweep Speed Toggle (25 <-> 50 mm/s)
+    // 4. Sweep Speed Toggle
     if (DOM.btnSpeed) {
       DOM.btnSpeed.addEventListener("click", () => {
         state.sweepSpeedMmPerSec = state.sweepSpeedMmPerSec === 25 ? 50 : 25;
         const sub = DOM.btnSpeed.querySelector(".sk-sub");
         if (sub) sub.textContent = `${state.sweepSpeedMmPerSec} mm/s`;
-        if (DOM.metaSpeedGain) {
-          DOM.metaSpeedGain.textContent = `${state.sweepSpeedMmPerSec} mm/s | 10 mm/mV`;
-        }
+        updateMetaChip();
       });
     }
 
-    // 5. Gain Toggle (AUTO -> 1X -> 2X)
+    // 5. Gain Toggle
     if (DOM.btnGain) {
       DOM.btnGain.addEventListener("click", () => {
         if (state.gainMode === "AUTO") state.gainMode = "1X";
@@ -688,11 +955,22 @@
         else state.gainMode = "AUTO";
 
         const sub = DOM.btnGain.querySelector(".sk-sub");
-        if (sub) sub.textContent = `GAIN: ${state.gainMode}`;
+        if (sub) sub.textContent = state.gainMode;
+        updateMetaChip();
       });
     }
 
-    // 6. QRS Tone Toggle
+    // 6. 1 mV Calibration Pulse Toggle
+    if (DOM.btnCalPulse) {
+      DOM.btnCalPulse.addEventListener("click", () => {
+        state.calPulseOn = !state.calPulseOn;
+        DOM.btnCalPulse.classList.toggle("active", state.calPulseOn);
+        const sub = DOM.btnCalPulse.querySelector(".sk-sub");
+        if (sub) sub.textContent = state.calPulseOn ? "PULSE ON" : "PULSE OFF";
+      });
+    }
+
+    // 7. QRS Tone Toggle
     if (DOM.btnQrsBeep) {
       DOM.btnQrsBeep.addEventListener("click", () => {
         state.qrsBeepOn = !state.qrsBeepOn;
@@ -705,7 +983,7 @@
       });
     }
 
-    // 7. Audio Pause / Mute Alarms (120-sec countdown)
+    // 8. Audio Pause / Mute Alarms
     if (DOM.btnMuteAlarms) {
       DOM.btnMuteAlarms.addEventListener("click", () => {
         if (!window.heartixAudio) return;
@@ -728,11 +1006,9 @@
       });
     }
 
-    // 8. Events Drawer
+    // 9. Events Drawer
     if (DOM.btnEvents) {
-      DOM.btnEvents.addEventListener("click", () => {
-        openEventsDrawer();
-      });
+      DOM.btnEvents.addEventListener("click", () => openEventsDrawer());
     }
     if (DOM.btnCloseEvents) {
       DOM.btnCloseEvents.addEventListener("click", () => {
@@ -740,48 +1016,45 @@
       });
     }
 
-    // 9. Export CSV
+    // 10. Export CSV & Save PNG
     if (DOM.btnSaveCsv) {
       DOM.btnSaveCsv.addEventListener("click", () => {
         window.location.href = "/api/export/csv";
       });
     }
-
-    // 10. PDF Report / Print
-    if (DOM.btnPdfReport) {
-      DOM.btnPdfReport.addEventListener("click", () => {
-        generatePrintReport();
-      });
+    if (DOM.btnSavePng) {
+      DOM.btnSavePng.addEventListener("click", () => saveCanvasPngSnapshot());
     }
 
-    // 11. Patient Modal
+    // 11. PDF Report / Print
+    if (DOM.btnPdfReport) {
+      DOM.btnPdfReport.addEventListener("click", () => generatePrintReport());
+    }
+
+    // 12. Patient Modal
     if (DOM.btnPatient) {
       DOM.btnPatient.addEventListener("click", () => {
-        openPatientModal();
+        if (state.observerMode || !ensureAdminPin()) return;
+        if (DOM.patientModal) DOM.patientModal.classList.remove("hidden");
       });
     }
 
-    // 12. Lab Test Simulator Bar Toggle
+    // 13. Lab Test Simulator Bar Toggle
     if (DOM.btnLabTest) {
       DOM.btnLabTest.addEventListener("click", () => {
-        if (state.esp32Connected) return; // disabled when hardware connected
+        if (state.observerMode || state.esp32Connected || !ensureAdminPin()) return;
         const isHidden = DOM.labTestBar.classList.contains("hidden");
-        if (isHidden) {
-          DOM.labTestBar.classList.remove("hidden");
-          DOM.btnLabTest.classList.add("active");
-        } else {
-          DOM.labTestBar.classList.add("hidden");
-          DOM.btnLabTest.classList.remove("active");
-        }
+        DOM.labTestBar.classList.toggle("hidden", !isHidden);
+        DOM.btnLabTest.classList.toggle("active", isHidden);
       });
     }
 
-    // Lab Test Mode buttons
     const simButtons = document.querySelectorAll("[data-sim-mode]");
-    simButtons.forEach(btn => {
+    simButtons.forEach((btn) => {
       btn.addEventListener("click", (e) => {
+        if (state.observerMode || !ensureAdminPin()) return;
         const mode = e.currentTarget.getAttribute("data-sim-mode");
-        simButtons.forEach(b => b.classList.remove("active"));
+        simButtons.forEach((b) => b.classList.remove("active"));
         e.currentTarget.classList.add("active");
         sendWsCommand("simulate", { mode });
         state.simMode = true;
@@ -791,7 +1064,8 @@
 
     if (DOM.btnSimStop) {
       DOM.btnSimStop.addEventListener("click", () => {
-        simButtons.forEach(b => b.classList.remove("active"));
+        if (state.observerMode) return;
+        simButtons.forEach((b) => b.classList.remove("active"));
         sendWsCommand("stop_sim");
         state.simMode = false;
         applyHardwarePriorityUI();
@@ -811,11 +1085,22 @@
         await submitPatientAdmission(true);
       });
     }
-  }
 
-  // --- PATIENT ADMISSION MODAL HANDLERS ---
-  function openPatientModal() {
-    if (DOM.patientModal) DOM.patientModal.classList.remove("hidden");
+    // Bedside Keyboard Shortcuts (Space = Freeze, M = Mute, S = Speed, G = Gain)
+    document.addEventListener("keydown", (e) => {
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (e.code === "Space" && DOM.btnFreeze) {
+        e.preventDefault();
+        DOM.btnFreeze.click();
+      } else if (e.key.toLowerCase() === "m" && DOM.btnMuteAlarms) {
+        DOM.btnMuteAlarms.click();
+      } else if (e.key.toLowerCase() === "s" && DOM.btnSpeed) {
+        DOM.btnSpeed.click();
+      } else if (e.key.toLowerCase() === "g" && DOM.btnGain) {
+        DOM.btnGain.click();
+      }
+    });
   }
 
   async function submitPatientAdmission(isGuest) {
@@ -848,17 +1133,21 @@
     }
 
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (state.adminPin) headers["X-Admin-Pin"] = state.adminPin;
+
       const res = await fetch("/api/patient", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(patientPayload)
       });
       if (res.ok) {
         const data = await res.json();
         syncPatientData(data.patient || patientPayload);
+      } else {
+        syncPatientData(patientPayload);
       }
     } catch (err) {
-      console.error("Failed to submit patient admission:", err);
       syncPatientData(patientPayload);
     }
 
@@ -889,27 +1178,30 @@
       return;
     }
 
-    DOM.eventsList.innerHTML = events.map((ev, idx) => `
-      <div class="event-item ${ev.severity === 'high' ? 'severity-high' : ''}" data-index="${idx}">
+    DOM.eventsList.innerHTML = events
+      .map(
+        (ev, idx) => `
+      <div class="event-item ${ev.severity === "high" ? "severity-high" : ""}" data-index="${idx}">
         <div style="display:flex; justify-content:space-between; font-weight:700; font-size:12px; margin-bottom:3px;">
-          <span style="color:var(--text-primary);">${ev.type || 'CLINICAL EVENT'}</span>
-          <span style="font-family:var(--font-mono); font-size:10px; color:var(--text-secondary);">${ev.timestamp || '--:--:--'}</span>
+          <span style="color:var(--text-primary);">${ev.type || ev.ai_label || "CLINICAL EVENT"}</span>
+          <span style="font-family:var(--font-mono); font-size:10px; color:var(--text-secondary);">${ev.timestamp || "--:--:--"}</span>
         </div>
-        <div style="font-size:11.5px; color:var(--text-secondary);">${ev.description || ev.reason || 'Telemetry threshold breach'}</div>
+        <div style="font-size:11.5px; color:var(--text-secondary);">${ev.description || ev.reason || "Telemetry threshold breach"}</div>
       </div>
-    `).join("");
+    `
+      )
+      .join("");
 
     const itemEls = DOM.eventsList.querySelectorAll(".event-item");
-    itemEls.forEach(el => {
+    itemEls.forEach((el) => {
       el.addEventListener("click", (e) => {
-        itemEls.forEach(i => i.classList.remove("selected"));
+        itemEls.forEach((i) => i.classList.remove("selected"));
         e.currentTarget.classList.add("selected");
         const idx = Number(e.currentTarget.getAttribute("data-index"));
         renderEventSnapshot(events[idx]);
       });
     });
 
-    // Auto-select first event if available
     if (events.length > 0) {
       itemEls[0].classList.add("selected");
       renderEventSnapshot(events[0]);
@@ -918,35 +1210,39 @@
 
   function renderEventSnapshot(ev) {
     if (DOM.eventSnapshotMeta) {
-      DOM.eventSnapshotMeta.textContent = `${ev.type} @ ${ev.timestamp} (${ev.severity || 'medium'} severity)`;
+      DOM.eventSnapshotMeta.textContent = `${ev.type || ev.ai_label} @ ${ev.timestamp} (${ev.severity || "medium"} severity)`;
     }
     const canvas = DOM.eventSnapshotCanvas;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     const width = canvas.clientWidth || 380;
     const height = canvas.clientHeight || 120;
-    canvas.width = width * (window.devicePixelRatio || 1);
-    canvas.height = height * (window.devicePixelRatio || 1);
-    ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     ctx.fillStyle = "#04070B";
     ctx.fillRect(0, 0, width, height);
 
-    // Draw grid
     ctx.strokeStyle = "rgba(10, 30, 20, 0.5)";
     ctx.lineWidth = 0.5;
     for (let x = 0; x < width; x += 20) {
-      ctx.moveTo(x, 0); ctx.lineTo(x, height);
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
     }
     for (let y = 0; y < height; y += 20) {
-      ctx.moveTo(0, y); ctx.lineTo(width, y);
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
     }
     ctx.stroke();
 
-    // Plot waveform snapshot samples if present in event, else sample rolling buffer
-    const samples = (ev.waveform_strip && ev.waveform_strip.length > 0) 
-      ? ev.waveform_strip 
-      : state.rollingPrintBuffer.map(p => p.sample).slice(-300);
+    const samples =
+      ev.waveform_strip && ev.waveform_strip.length > 0
+        ? ev.waveform_strip
+        : ev.waveform_5s && ev.waveform_5s.length > 0
+          ? ev.waveform_5s
+          : state.rollingPrintBuffer.map((p) => p.sample).slice(-300);
 
     if (!samples || samples.length === 0) return;
 
@@ -956,9 +1252,9 @@
     ctx.lineWidth = 1.8;
     ctx.beginPath();
     for (let i = 0; i < samples.length; i++) {
-      const val = typeof samples[i] === 'object' ? samples[i].sample : samples[i];
+      const val = typeof samples[i] === "object" ? samples[i].sample : samples[i];
       const x = i * dx;
-      const y = centerY - (val * (height * 0.28));
+      const y = centerY - val * (height * 0.28);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
@@ -980,46 +1276,46 @@
       `;
     }
 
-    // Render static pink-grid ECG strip canvas for print
     const printCanvas = DOM.printEcgCanvas;
     if (printCanvas) {
       const width = printCanvas.clientWidth || 900;
       const height = printCanvas.clientHeight || 190;
-      printCanvas.width = width * (window.devicePixelRatio || 1);
-      printCanvas.height = height * (window.devicePixelRatio || 1);
+      const dpr = window.devicePixelRatio || 1;
+      printCanvas.width = width * dpr;
+      printCanvas.height = height * dpr;
       const ctx = printCanvas.getContext("2d");
-      ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       ctx.fillStyle = "#FFF5F5";
       ctx.fillRect(0, 0, width, height);
 
-      // Pink ECG grid lines
       ctx.strokeStyle = "rgba(225, 29, 72, 0.22)";
       ctx.lineWidth = 0.6;
       ctx.beginPath();
       for (let x = 0; x < width; x += 25) {
-        ctx.moveTo(x, 0); ctx.lineTo(x, height);
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
       }
       for (let y = 0; y < height; y += 25) {
-        ctx.moveTo(0, y); ctx.lineTo(width, y);
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
       }
       ctx.stroke();
 
-      const printSamples = state.rollingPrintBuffer.length > 0 
-        ? state.rollingPrintBuffer 
-        : state.ecgBuffer;
+      const printSamples =
+        state.rollingPrintBuffer.length > 0 ? state.rollingPrintBuffer : state.ecgBuffer;
 
       if (printSamples.length > 0) {
         const dx = width / Math.max(printSamples.length, 1250);
         const centerY = height / 2;
-        ctx.strokeStyle = "#9F1239"; // Rose / Magenta clinical trace
+        ctx.strokeStyle = "#9F1239";
         ctx.lineWidth = 1.6;
         ctx.beginPath();
         for (let i = 0; i < printSamples.length; i++) {
           const pt = printSamples[i];
-          const val = typeof pt === 'object' ? pt.sample : pt;
+          const val = typeof pt === "object" ? pt.sample : pt;
           const x = i * dx;
-          const y = centerY - (val * (height * 0.3));
+          const y = centerY - val * (height * 0.3);
           if (i === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         }
@@ -1027,7 +1323,6 @@
       }
     }
 
-    // Populate Metrics Summary Table
     if (DOM.printMetricsTable) {
       DOM.printMetricsTable.innerHTML = `
         <thead>
@@ -1041,51 +1336,50 @@
         <tbody>
           <tr>
             <td>Heart Rate (HR)</td>
-            <td><strong>${DOM.valBpm ? DOM.valBpm.textContent : '---'} BPM</strong></td>
+            <td><strong>${DOM.valBpm ? DOM.valBpm.textContent : "---"} BPM</strong></td>
             <td>60 – 100 BPM</td>
             <td>${state.patient.minHr}–${state.patient.maxHr} limit configured</td>
           </tr>
           <tr>
             <td>R-R Interval</td>
-            <td>${DOM.valRr ? DOM.valRr.textContent : '---'} ms</td>
+            <td>${DOM.valRr ? DOM.valRr.textContent : "---"} ms</td>
             <td>600 – 1000 ms</td>
-            <td>Normal Sinus Interval</td>
+            <td>Sinus Cycle Length</td>
           </tr>
           <tr>
             <td>HRV (RMSSD)</td>
-            <td>${DOM.valHrv ? DOM.valHrv.textContent : '---'} ms</td>
+            <td>${DOM.valHrv ? DOM.valHrv.textContent : "---"} ms</td>
             <td>20 – 200 ms</td>
             <td>Autonomic Tone Index</td>
           </tr>
           <tr>
             <td>QRS Duration</td>
-            <td>${DOM.valQrs ? DOM.valQrs.textContent : '---'} ms</td>
+            <td>${DOM.valQrs ? DOM.valQrs.textContent : "---"} ms</td>
             <td>60 – 100 ms</td>
             <td>Intraventricular Conduction</td>
           </tr>
           <tr>
             <td>ST Segment Deviation</td>
-            <td>${DOM.valSt ? DOM.valSt.textContent : '---'} mV</td>
+            <td>${DOM.valSt ? DOM.valSt.textContent : "---"} mV</td>
             <td>-0.05 to +0.10 mV</td>
-            <td>${DOM.valStStatus ? DOM.valStStatus.textContent : 'Screening'}</td>
+            <td>${DOM.valStStatus ? DOM.valStStatus.textContent : "Screening"}</td>
           </tr>
           <tr>
             <td>Signal Quality Index (SQI)</td>
-            <td>${DOM.badgeSqi ? DOM.badgeSqi.textContent : '---'}</td>
-            <td>> 80%</td>
-            <td>Artifact Free Telemetry</td>
+            <td>${DOM.badgeSqi ? DOM.badgeSqi.textContent : "---"}</td>
+            <td>&gt; 75% Optimal</td>
+            <td>Continuous Telemetry</td>
           </tr>
           <tr>
             <td>AI Rhythm Classification</td>
-            <td><strong>${DOM.aiStatusPill ? DOM.aiStatusPill.textContent : '---'}</strong></td>
+            <td><strong>${DOM.aiStatusPill ? DOM.aiStatusPill.textContent : "---"}</strong></td>
             <td>Normal Sinus</td>
-            <td>Confidence: ${DOM.valAiConfidence ? DOM.valAiConfidence.textContent : '---'}</td>
+            <td>Confidence: ${DOM.valAiConfidence ? DOM.valAiConfidence.textContent : "---"}</td>
           </tr>
         </tbody>
       `;
     }
 
-    // Populate Events Table
     if (DOM.printEventsTable) {
       const events = state.eventsListCache || [];
       if (events.length === 0) {
@@ -1100,22 +1394,24 @@
             </tr>
           </thead>
           <tbody>
-            ${events.map(ev => `
+            ${events
+              .map(
+                (ev) => `
               <tr>
-                <td>${ev.timestamp || '--'}</td>
-                <td><strong>${ev.type || 'ALARM'}</strong></td>
-                <td>${ev.description || ev.reason || 'Threshold breach'}</td>
+                <td>${ev.timestamp || "--"}</td>
+                <td><strong>${ev.type || ev.ai_label || "ALARM"}</strong></td>
+                <td>${ev.description || ev.reason || "Threshold breach"}</td>
               </tr>
-            `).join("")}
+            `
+              )
+              .join("")}
           </tbody>
         `;
       }
     }
 
-    // Trigger browser print dialog
     setTimeout(() => {
       window.print();
     }, 350);
   }
-
 })();

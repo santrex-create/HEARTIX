@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -23,8 +23,18 @@ from ai_classifier import HybridAIClassifier
 from ecg_processor import ECGProcessor
 from ecg_simulator import ECGSimulator
 
-# Ensure static directory exists before mounting so local tests never fail prior to Phase 3
 os.makedirs("static", exist_ok=True)
+
+
+def _get_admin_pin() -> str:
+    return os.getenv("HEARTIX_ADMIN_PIN", "").strip()
+
+
+def _verify_admin_pin(provided_pin: str | None) -> bool:
+    expected = _get_admin_pin()
+    if not expected:
+        return True
+    return (provided_pin or "").strip() == expected
 
 
 class PatientModel(BaseModel):
@@ -42,7 +52,7 @@ class HeartixHub:
     """
     Central Real-Time Telemetry Hub managing:
     - Single active ESP32 hardware stream (with automatic reconnect takeover & priority)
-    - Multiple concurrent browser WebSocket viewers
+    - Operator and read-only Observer browser WebSocket viewers
     - Dual-path ECGProcessor & 250 Hz ECGSimulator state
     - Sequence gap tracking, packet-loss telemetry, and 25-event clinical abnormality memory
     """
@@ -57,16 +67,19 @@ class HeartixHub:
         self.last_esp32_packet_ts: float = 0.0
         self.disconnected_mid_session: bool = False
 
-        # Simulator MUST default to None (OFF) on server boot
+        # Simulator defaults to None (OFF) on server boot
         self.sim_mode: str | None = None
 
         self.web_clients: set[WebSocket] = set()
+        self.observer_clients: set[WebSocket] = set()
 
         # Rolling sequence & packet telemetry over a 10-second window
         self.last_seq: int | None = None
         self._packet_window: deque[tuple[float, int, int, int]] = deque(maxlen=250)
         self.packet_loss_pct: float = 0.0
         self.effective_hz: float = 0.0
+        self.latest_sqi: int | None = None
+        self.latest_metrics_payload: dict[str, Any] | None = None
 
         # Clinical abnormality events (capped at 25 in-memory records)
         self.events: deque[dict[str, Any]] = deque(maxlen=25)
@@ -90,11 +103,14 @@ class HeartixHub:
         self._packet_window.clear()
         self.packet_loss_pct = 0.0
         self.effective_hz = 0.0
+        self.latest_sqi = None
+        self.latest_metrics_payload = None
 
     def record_esp32_packet(self, seq: int | None, sample_count: int) -> None:
         """
         Tracks uint16 sequence wraparound (0-65535), computes rolling packet_loss_pct
-        and effective_hz, and resets causal DSP filters if a packet gap > 3 occurs.
+        and effective_hz (smoothed against cold-start bursts), and resets causal DSP
+        filters if a packet gap > 3 occurs.
         """
         now = time.monotonic()
         lost = 0
@@ -103,23 +119,19 @@ class HeartixHub:
             seq_u16 = int(seq) & 0xFFFF
             if self.last_seq is not None:
                 delta = (seq_u16 - self.last_seq) & 0xFFFF
-                if delta == 0:
-                    lost = 0
-                elif delta == 1:
+                if delta in (0, 1):
                     lost = 0
                 elif 1 < delta <= 1000:
                     lost = delta - 1
                     if lost > 3:
                         self.processor.reset_filters()
                 else:
-                    # Large jump indicates ESP32 reboot or counter reset
                     lost = 0
                     self.processor.reset_filters()
             self.last_seq = seq_u16
 
         self._packet_window.append((now, 1, lost, sample_count))
 
-        # Prune telemetry older than 10.0 seconds
         cutoff = now - 10.0
         while self._packet_window and self._packet_window[0][0] < cutoff:
             self._packet_window.popleft()
@@ -135,9 +147,10 @@ class HeartixHub:
 
         if len(self._packet_window) >= 2:
             elapsed = now - self._packet_window[0][0]
-            if elapsed >= 0.15:
+            if elapsed >= 0.25:
                 samples_after_first = sum(item[3] for item in list(self._packet_window)[1:])
-                self.effective_hz = round(min(260.0, samples_after_first / elapsed), 1)
+                raw_hz = samples_after_first / elapsed
+                self.effective_hz = round(min(255.0, max(0.0, raw_hz)), 1)
             else:
                 self.effective_hz = 250.0
         elif len(self._packet_window) == 1:
@@ -145,7 +158,7 @@ class HeartixHub:
         else:
             self.effective_hz = 0.0
 
-    def build_state_payload(self) -> dict[str, Any]:
+    def build_state_payload(self, is_observer: bool = False) -> dict[str, Any]:
         """Constructs the canonical state synchronization message for web clients."""
         return {
             "type": "state",
@@ -154,6 +167,8 @@ class HeartixHub:
             "packet_loss_pct": self.packet_loss_pct,
             "effective_hz": self.effective_hz,
             "disconnected_mid_session": self.disconnected_mid_session,
+            "pin_required": bool(_get_admin_pin()),
+            "observer_mode": is_observer,
             "patient": self.patient,
         }
 
@@ -177,6 +192,7 @@ class HeartixHub:
             "bradycardia": False,
             "tachycardia": False,
             "arrhythmia": False,
+            "pvc_count": 0,
             "event_count": len(self.events),
             "packet_loss_pct": self.packet_loss_pct,
             "effective_hz": self.effective_hz,
@@ -195,10 +211,23 @@ class HeartixHub:
                 dead_clients.append(ws)
         for ws in dead_clients:
             self.web_clients.discard(ws)
+            self.observer_clients.discard(ws)
 
     async def broadcast_state(self) -> None:
-        """Broadcasts the current system state to all browser clients."""
-        await self.broadcast_json(self.build_state_payload())
+        """Broadcasts the current system state to operator and observer browser clients."""
+        if not self.web_clients:
+            return
+        dead_clients: list[WebSocket] = []
+        op_msg = json.dumps(self.build_state_payload(is_observer=False))
+        obs_msg = json.dumps(self.build_state_payload(is_observer=True))
+        for ws in list(self.web_clients):
+            try:
+                await ws.send_text(obs_msg if ws in self.observer_clients else op_msg)
+            except Exception:
+                dead_clients.append(ws)
+        for ws in dead_clients:
+            self.web_clients.discard(ws)
+            self.observer_clients.discard(ws)
 
 
 hub = HeartixHub()
@@ -208,7 +237,7 @@ async def esp32_watchdog_loop() -> None:
     """
     Runs every 0.5s. If esp32_connected is True and no packet has arrived for 2.5 seconds,
     forcefully closes the dead ESP32 socket, resets processor/telemetry, and broadcasts
-    updated state + offline metrics (with alarm_level="low").
+    updated state + offline metrics.
     """
     while True:
         await asyncio.sleep(0.5)
@@ -229,7 +258,9 @@ async def esp32_watchdog_loop() -> None:
                         pass
 
                 await hub.broadcast_state()
-                await hub.broadcast_json(hub.build_disconnect_metrics_payload())
+                disconnect_payload = hub.build_disconnect_metrics_payload()
+                hub.latest_metrics_payload = disconnect_payload
+                await hub.broadcast_json(disconnect_payload)
 
 
 async def analysis_loop() -> None:
@@ -244,6 +275,8 @@ async def analysis_loop() -> None:
             continue
 
         result = await asyncio.to_thread(hub.processor.analyze_window)
+        if result.get("sqi") is not None:
+            hub.latest_sqi = int(result["sqi"])
 
         if result.get("valid_signal") is True and result.get("alarm_level") in ("medium", "high"):
             ai_label = str(result.get("ai_label") or "ABNORMALITY")
@@ -252,14 +285,22 @@ async def analysis_loop() -> None:
             if (now_mono - last_logged) >= 10.0:
                 hub.last_event_ts_by_label[ai_label] = now_mono
                 waveform_5s = await asyncio.to_thread(hub.processor.get_recent_snapshot, 5.0)
+                now_iso = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+                reason_txt = str(result.get("ai_reason") or "Physiological threshold breach")
+                alarm_lvl = str(result.get("alarm_level") or "medium")
+
                 event_record = {
                     "id": uuid.uuid4().hex[:10],
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": now_iso,
+                    "type": ai_label,
+                    "description": reason_txt,
+                    "reason": reason_txt,
+                    "severity": alarm_lvl,
+                    "alarm_level": alarm_lvl,
                     "source": "esp32" if hub.esp32_connected else f"simulator:{hub.sim_mode}",
                     "ai_label": ai_label,
                     "ai_confidence": result.get("ai_confidence"),
-                    "ai_reason": result.get("ai_reason"),
-                    "alarm_level": result.get("alarm_level"),
+                    "ai_reason": reason_txt,
                     "bpm": result.get("bpm"),
                     "rr_ms": result.get("rr_ms"),
                     "hrv_ms": result.get("hrv_ms"),
@@ -272,6 +313,7 @@ async def analysis_loop() -> None:
                     "arrhythmia": result.get("arrhythmia"),
                     "patient_id": hub.patient.get("patient_id", ""),
                     "patient_name": hub.patient.get("name", ""),
+                    "waveform_strip": waveform_5s,
                     "waveform_5s": waveform_5s,
                 }
                 hub.events.appendleft(event_record)
@@ -283,6 +325,7 @@ async def analysis_loop() -> None:
             "packet_loss_pct": hub.packet_loss_pct,
             "effective_hz": hub.effective_hz,
         }
+        hub.latest_metrics_payload = metrics_payload
         await hub.broadcast_json(metrics_payload)
 
 
@@ -350,7 +393,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Heartix Smart ECG Monitoring System",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -378,6 +421,8 @@ async def health_check() -> dict[str, Any]:
         "packet_loss_pct": hub.packet_loss_pct,
         "effective_hz": hub.effective_hz,
         "active_viewers": len(hub.web_clients),
+        "observer_viewers": len(hub.observer_clients),
+        "pin_required": bool(_get_admin_pin()),
     }
 
 
@@ -387,7 +432,12 @@ async def get_events() -> dict[str, Any]:
 
 
 @app.post("/api/session/reset")
-async def reset_session() -> dict[str, str]:
+async def reset_session(
+    x_admin_pin: str | None = Header(default=None),
+) -> dict[str, str]:
+    if not _verify_admin_pin(x_admin_pin):
+        raise HTTPException(status_code=403, detail="Invalid or missing admin PIN")
+
     hub.processor.reset()
     hub.simulator.reset()
     hub.reset_telemetry()
@@ -404,7 +454,13 @@ async def reset_session() -> dict[str, str]:
 
 
 @app.post("/api/patient")
-async def update_patient(patient: PatientModel) -> dict[str, Any]:
+async def update_patient(
+    patient: PatientModel,
+    x_admin_pin: str | None = Header(default=None),
+) -> dict[str, Any]:
+    if not _verify_admin_pin(x_admin_pin):
+        raise HTTPException(status_code=403, detail="Invalid or missing admin PIN")
+
     min_hr = min(patient.min_hr, patient.max_hr - 10)
     max_hr = max(patient.max_hr, min_hr + 10)
 
@@ -429,6 +485,7 @@ async def export_csv() -> StreamingResponse:
     patient = hub.patient
     now_utc = datetime.now(timezone.utc)
     ts_str = now_utc.strftime("%Y%m%d_%H%M%S")
+    latest_sqi = hub.latest_sqi
 
     raw_pid = str(patient.get("patient_id") or "anonymous").strip()
     safe_pid = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_pid).strip("_") or "anonymous"
@@ -447,7 +504,7 @@ async def export_csv() -> StreamingResponse:
         buf.write(f"# Export Time (UTC): {now_utc.isoformat()}\n")
 
         writer = csv.writer(buf)
-        writer.writerow(["timestamp_iso", "ecg_mv", "bpm", "status"])
+        writer.writerow(["timestamp_iso", "ecg_mv", "bpm", "sqi_pct", "status"])
         yield buf.getvalue()
         buf.seek(0)
         buf.truncate(0)
@@ -458,8 +515,9 @@ async def export_csv() -> StreamingResponse:
             iso_ts = datetime.fromtimestamp(ts_val, tz=timezone.utc).isoformat()
             ecg_mv = rec.get("ecg_mv", 0.0)
             bpm_val = "" if rec.get("bpm") is None else rec.get("bpm")
+            sqi_val = "" if latest_sqi is None else latest_sqi
             status_val = rec.get("status", "")
-            writer.writerow([iso_ts, ecg_mv, bpm_val, status_val])
+            writer.writerow([iso_ts, ecg_mv, bpm_val, sqi_val, status_val])
             chunk_count += 1
             if chunk_count >= 1000:
                 yield buf.getvalue()
@@ -569,7 +627,6 @@ async def ws_esp32_endpoint(
     except Exception:
         pass
     finally:
-        # Only clear state if this socket is still the active ESP32 connection
         if hub.esp32_ws is websocket:
             hub.esp32_ws = None
             hub.esp32_connected = False
@@ -577,16 +634,27 @@ async def ws_esp32_endpoint(
             hub.processor.reset()
             hub.reset_telemetry()
             await hub.broadcast_state()
-            await hub.broadcast_json(hub.build_disconnect_metrics_payload())
+            disconnect_payload = hub.build_disconnect_metrics_payload()
+            hub.latest_metrics_payload = disconnect_payload
+            await hub.broadcast_json(disconnect_payload)
 
 
 @app.websocket("/ws/web")
-async def ws_web_endpoint(websocket: WebSocket) -> None:
+async def ws_web_endpoint(
+    websocket: WebSocket,
+    mode: str = Query(default="operator"),
+    pin: str = Query(default=""),
+) -> None:
     await websocket.accept()
+    is_observer = str(mode).strip().lower() == "observer"
     hub.web_clients.add(websocket)
+    if is_observer:
+        hub.observer_clients.add(websocket)
 
     try:
-        await websocket.send_text(json.dumps(hub.build_state_payload()))
+        await websocket.send_text(json.dumps(hub.build_state_payload(is_observer=is_observer)))
+        if hub.latest_metrics_payload is not None:
+            await websocket.send_text(json.dumps(hub.latest_metrics_payload))
 
         while True:
             raw_text = await websocket.receive_text()
@@ -600,8 +668,9 @@ async def ws_web_endpoint(websocket: WebSocket) -> None:
             action = cmd.get("action")
 
             if action == "simulate":
-                # Hardware priority: ignore simulator commands whenever physical ESP32 is connected
-                if hub.esp32_connected:
+                if is_observer or hub.esp32_connected:
+                    continue
+                if not _verify_admin_pin(str(cmd.get("pin", pin))):
                     continue
                 requested_mode = str(cmd.get("mode", "normal")).strip().lower()
                 if requested_mode not in ECGSimulator.SUPPORTED_MODES:
@@ -616,6 +685,10 @@ async def ws_web_endpoint(websocket: WebSocket) -> None:
                 await hub.broadcast_state()
 
             elif action == "stop_sim":
+                if is_observer:
+                    continue
+                if not _verify_admin_pin(str(cmd.get("pin", pin))):
+                    continue
                 if hub.sim_mode is not None:
                     hub.sim_mode = None
                     hub.processor.reset()
@@ -632,3 +705,4 @@ async def ws_web_endpoint(websocket: WebSocket) -> None:
         pass
     finally:
         hub.web_clients.discard(websocket)
+        hub.observer_clients.discard(websocket)

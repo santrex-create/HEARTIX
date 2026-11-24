@@ -39,9 +39,16 @@ class HybridAIClassifier:
             n_jobs=1,
         )
         self.is_external_model: bool = False
+        self._abn_streak: int = 0
+        self._last_abn_key: str = ""
         self._train_synthetic_mitbih_baseline()
         if model_path and os.path.isfile(model_path):
             self.load_external_model(model_path)
+
+    def reset_hysteresis(self) -> None:
+        """Resets consecutive abnormal-window alarm debouncing counters."""
+        self._abn_streak = 0
+        self._last_abn_key = ""
 
     def _train_synthetic_mitbih_baseline(self) -> None:
         """
@@ -140,7 +147,8 @@ class HybridAIClassifier:
 
     def classify(self, features: dict, min_hr: int = 60, max_hr: int = 100) -> dict:
         """
-        Combines RandomForest probability inference with deterministic clinical guardrails.
+        Combines RandomForest probability inference with deterministic clinical guardrails,
+        motion-artifact separation, PVC detection, and 2-window alarm hysteresis.
         """
         bpm = float(features.get("bpm", 75.0))
         rr_mean_ms = float(features.get("rr_mean_ms", 60000.0 / max(bpm, 25.0)))
@@ -150,6 +158,26 @@ class HybridAIClassifier:
         qrs_ms = float(features.get("qrs_ms", 88.0))
         st_mv = float(features.get("st_mv", 0.0))
         r_amp_cv = float(features.get("r_amp_cv", 0.04))
+        sqi = float(features.get("sqi", 100.0))
+        hf_noise_ratio = float(features.get("hf_noise_ratio", 0.0))
+        pvc_count = int(features.get("pvc_count", 0))
+
+        # Separate heavy motion/EMG artifact from true arrhythmia while keeping metrics visible
+        if sqi < 42.0 and hf_noise_ratio > 0.35:
+            self._abn_streak = 0
+            self._last_abn_key = ""
+            return {
+                "label": "MOTION ARTIFACT / NOISY SIGNAL",
+                "confidence_pct": int(np.clip(round(100.0 - sqi), 50, 92)),
+                "alarm_level": "technical",
+                "reason": (
+                    f"High-frequency muscle/motion noise detected (SQI {sqi:.0f}%); "
+                    f"estimated rate {bpm:.0f} BPM."
+                ),
+                "bradycardia": bool(bpm < float(min_hr)),
+                "tachycardia": bool(bpm > float(max_hr)),
+                "arrhythmia": False,
+            }
 
         vec = np.array(
             [[bpm, rr_mean_ms, rr_std_ms, rmssd_ms, rr_cv, qrs_ms, st_mv, r_amp_cv]],
@@ -169,21 +197,25 @@ class HybridAIClassifier:
         is_arrhythmia = (rr_cv >= 0.16) or (rmssd_ms >= 135.0 and rr_cv >= 0.13)
         is_st_risk = abs(st_mv) >= 0.15
 
-        # Hybrid arbitration: synchronize ML probabilities with hard clinical boundaries
         reasons: list[str] = []
         chosen_label = ml_label
         chosen_conf = ml_conf
+        abn_key = ""
 
         if is_arrhythmia:
+            abn_key = "arrhythmia"
             chosen_label = "ARRHYTHMIA / IRREGULAR RHYTHM"
             rule_boost = min(99.0, 78.0 + (rr_cv - 0.16) * 110.0)
-            chosen_conf = max( float(probs[3]) * 100.0, rule_boost )
+            chosen_conf = max(float(probs[3]) * 100.0, rule_boost)
             reasons.append(
                 f"Irregular R-R cadence detected (RR CV {rr_cv * 100:.1f}%, RMSSD {rmssd_ms:.0f} ms)"
             )
+            if pvc_count > 0:
+                reasons.append(f"{pvc_count} premature ectopic beat(s) observed")
             if is_st_risk:
                 reasons.append(f"concurrent ST deviation ({st_mv:+.2f} mV)")
         elif is_st_risk:
+            abn_key = "st_risk"
             chosen_label = "ST SEGMENT ELEVATION RISK"
             rule_boost = min(98.0, 80.0 + (abs(st_mv) - 0.15) * 90.0)
             chosen_conf = max(float(probs[4]) * 100.0, rule_boost)
@@ -196,6 +228,7 @@ class HybridAIClassifier:
             elif is_brady:
                 reasons.append(f"HR low at {bpm:.0f} BPM")
         elif is_tachy:
+            abn_key = "tachy"
             chosen_label = "SINUS TACHYCARDIA"
             margin = (bpm - float(max_hr)) / max(float(max_hr), 1.0)
             rule_boost = min(98.0, 82.0 + margin * 60.0)
@@ -209,6 +242,7 @@ class HybridAIClassifier:
                     f"Heart rate {bpm:.0f} BPM exceeds upper limit ({max_hr} BPM) with regular rhythm"
                 )
         elif is_brady:
+            abn_key = "brady"
             chosen_label = "SINUS BRADYCARDIA"
             margin = (float(min_hr) - bpm) / max(float(min_hr), 1.0)
             rule_boost = min(98.0, 82.0 + margin * 65.0)
@@ -227,14 +261,30 @@ class HybridAIClassifier:
             reasons.append(
                 f"Regular sinus cadence ({bpm:.0f} BPM, RR CV {rr_cv * 100:.1f}%, ST {st_mv:+.2f} mV)"
             )
+            if pvc_count > 0:
+                reasons.append(f"isolated premature beat ({pvc_count}) noted")
 
-        # Alarm priority determination
-        if is_arrhythmia or is_extreme_brady or is_extreme_tachy:
-            alarm_level = "high"
-        elif is_brady or is_tachy or is_st_risk:
-            alarm_level = "medium"
+        # 2-window alarm hysteresis to prevent single-second false alarm bursts
+        if abn_key:
+            if abn_key == self._last_abn_key:
+                self._abn_streak += 1
+            else:
+                self._last_abn_key = abn_key
+                self._abn_streak = 1
         else:
+            self._last_abn_key = ""
+            self._abn_streak = 0
+
+        if not abn_key or self._abn_streak < 2:
             alarm_level = "none"
+        elif is_arrhythmia or is_extreme_brady or is_extreme_tachy:
+            alarm_level = "high"
+        else:
+            alarm_level = "medium"
+
+        # Slightly temper confidence when SQI is low so user sees honest certainty
+        if sqi < 60.0:
+            chosen_conf = min(chosen_conf, 55.0 + 0.45 * sqi)
 
         confidence_pct = int(np.clip(round(chosen_conf), 50, 99))
 

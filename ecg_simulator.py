@@ -9,6 +9,7 @@ class ECGSimulator:
     250 Hz Phase-Continuous Synthetic AD8232 ECG Waveform Generator.
     Synthesizes realistic P-QRS-T morphology centered at 1650.0 mV (AD8232 gain ~1100)
     with injected 50 Hz AC mains hum, 0.25 Hz respiratory baseline wander, and Gaussian noise.
+    Includes PVC ectopic beats and low-contact (<60% SQI) test presets.
     """
 
     AD8232_MID_MV: float = 1650.0
@@ -19,7 +20,9 @@ class ECGSimulator:
         "tachycardia",
         "bradycardia",
         "arrhythmia",
+        "pvc",
         "st_elevation",
+        "low_contact",
         "motion_artifact",
         "leads_off",
     )
@@ -30,6 +33,9 @@ class ECGSimulator:
         self._t_sec: float = 0.0
         self._beat_elapsed_sec: float = 0.0
         self._current_rr_sec: float = 60.0 / 74.0
+        self._beat_count: int = 0
+        self._is_pvc_beat: bool = False
+        self._pvc_compensatory_next: bool = False
         self._arrhythmia_pattern_idx: int = 0
         self._arrhythmia_rr_factors: tuple[float, ...] = (
             1.00,
@@ -48,10 +54,16 @@ class ECGSimulator:
         self._t_sec = 0.0
         self._beat_elapsed_sec = 0.0
         self._current_rr_sec = 60.0 / 74.0
+        self._beat_count = 0
+        self._is_pvc_beat = False
+        self._pvc_compensatory_next = False
         self._arrhythmia_pattern_idx = 0
 
     def _next_rr_interval_sec(self, mode: str) -> float:
         """Selects the next beat-to-beat RR interval in seconds for the active mode."""
+        self._beat_count += 1
+        self._is_pvc_beat = False
+
         if mode == "tachycardia":
             base_bpm = 126.0 + float(self._rng.normal(0.0, 1.2))
             return 60.0 / np.clip(base_bpm, 120.0, 132.0)
@@ -66,10 +78,21 @@ class ECGSimulator:
             self._arrhythmia_pattern_idx += 1
             jitter = float(self._rng.normal(0.0, 0.025))
             return float(np.clip(base_rr * factor + jitter, 0.38, 1.35))
+        if mode == "pvc":
+            base_rr = 60.0 / 74.0
+            if self._pvc_compensatory_next:
+                self._pvc_compensatory_next = False
+                return float(base_rr * 1.34 + self._rng.normal(0.0, 0.015))
+            if self._beat_count % 5 == 0:
+                self._is_pvc_beat = True
+                self._pvc_compensatory_next = True
+                return float(base_rr * 0.66 + self._rng.normal(0.0, 0.012))
+            return float(base_rr + self._rng.normal(0.0, 0.012))
         if mode == "st_elevation":
             base_bpm = 78.0 + float(self._rng.normal(0.0, 1.0))
             return 60.0 / np.clip(base_bpm, 74.0, 82.0)
-        # Default ("normal" or "motion_artifact")
+
+        # Default ("normal", "low_contact", or "motion_artifact")
         base_bpm = 74.0 + float(self._rng.normal(0.0, 1.1))
         return 60.0 / np.clip(base_bpm, 70.0, 78.0)
 
@@ -85,20 +108,27 @@ class ECGSimulator:
         Evaluates clean physiological ECG voltage (in mV) at time offset `dt_from_r` (seconds)
         relative to the current beat's R-peak center.
         """
-        # P wave (-160 ms before R)
+        if self._is_pvc_beat:
+            # Premature Ventricular Contraction: absent P wave, widened tall R + deep discordant S/T
+            r_wide = self._gaussian_wave(dt_from_r, 0.000, 0.022, 1.48)
+            s_deep = self._gaussian_wave(dt_from_r, 0.048, 0.024, -0.68)
+            t_inv = self._gaussian_wave(dt_from_r, 0.210, 0.045, -0.34)
+            return r_wide + s_deep + t_inv
+
+        # P wave (-155 ms before R)
         p_wave = self._gaussian_wave(dt_from_r, -0.155, 0.022, 0.16)
-        # Q wave (-22 ms before R)
+        # Q wave (-21 ms before R)
         q_wave = self._gaussian_wave(dt_from_r, -0.021, 0.0075, -0.15)
-        # R peak (0 ms) -> +1.28 mV peak so filtered output lands in +1.0 to +1.4 mV
+        # R peak (0 ms) -> +1.28 mV peak
         r_wave = self._gaussian_wave(dt_from_r, 0.000, 0.0095, 1.28)
         # S wave (+22 ms after R)
         s_wave = self._gaussian_wave(dt_from_r, 0.022, 0.0085, -0.26)
-        # T wave (+200 ms after R)
+        # T wave (+195 ms after R)
         t_wave = self._gaussian_wave(dt_from_r, 0.195, 0.036, 0.28)
 
         val = p_wave + q_wave + r_wave + s_wave + t_wave
 
-        # Elevated ST plateau in "st_elevation" mode: J-point (+38 ms) through T-wave onset (+175 ms)
+        # Elevated ST plateau in "st_elevation" mode
         if mode == "st_elevation":
             st_plateau = 0.34 / (
                 (1.0 + math.exp(-(dt_from_r - 0.034) / 0.006))
@@ -126,7 +156,9 @@ class ECGSimulator:
                 self._t_sec += dt_step
                 drift = 45.0 * math.sin(2.0 * math.pi * 1.5 * self._t_sec)
                 noise = float(self._rng.normal(0.0, 18.0))
-                samples.append(round(float(np.clip(self.AD8232_MID_MV + drift + noise, 0.0, 3300.0)), 2))
+                samples.append(
+                    round(float(np.clip(self.AD8232_MID_MV + drift + noise, 0.0, 3300.0)), 2)
+                )
             return samples, True
 
         batch: list[float] = []
@@ -138,20 +170,28 @@ class ECGSimulator:
                 self._beat_elapsed_sec -= self._current_rr_sec
                 self._current_rr_sec = self._next_rr_interval_sec(normalized_mode)
 
-            # Place R-peak at 38% of the current RR cycle so P-QRS-T stays intact
             r_center_sec = max(0.20, min(0.32, 0.38 * self._current_rr_sec))
             dt_from_r = self._beat_elapsed_sec - r_center_sec
 
             clean_phys_mv = self._evaluate_pqrst_mv(dt_from_r, normalized_mode)
 
-            # Inject 0.25 Hz respiratory baseline wander + 50 Hz AC mains hum + light Gaussian noise
+            # Inject 0.25 Hz respiratory baseline wander + 50 Hz AC mains hum + Gaussian noise
             wander_mv = 0.08 * math.sin(2.0 * math.pi * 0.25 * self._t_sec)
             ac_hum_mv = 0.06 * math.sin(2.0 * math.pi * 50.0 * self._t_sec)
             gaussian_noise_mv = float(self._rng.normal(0.0, 0.016))
 
             total_phys_mv = clean_phys_mv + wander_mv + ac_hum_mv + gaussian_noise_mv
 
-            if normalized_mode == "motion_artifact":
+            if normalized_mode == "low_contact":
+                # Moderate dry-skin noise (~45-55% SQI) while preserving readable QRS complexes
+                dry_emg_mv = (
+                    0.24 * math.sin(2.0 * math.pi * 58.0 * self._t_sec)
+                    + float(self._rng.normal(0.0, 0.22))
+                )
+                baseline_sway_mv = 0.28 * math.sin(2.0 * math.pi * 0.85 * self._t_sec)
+                total_phys_mv = 0.72 * clean_phys_mv + dry_emg_mv + baseline_sway_mv + ac_hum_mv
+
+            elif normalized_mode == "motion_artifact":
                 # Heavy broadband high-frequency EMG (45-110 Hz) + large movement swings
                 emg_hf_mv = (
                     0.75 * math.sin(2.0 * math.pi * 63.0 * self._t_sec)
@@ -163,7 +203,6 @@ class ECGSimulator:
 
             raw_adc_mv = self.AD8232_MID_MV + total_phys_mv * self.AD8232_GAIN_SCALE
 
-            # Inject periodic ADC rail spikes in motion_artifact mode so saturation penalty triggers
             if normalized_mode == "motion_artifact":
                 spike_roll = float(self._rng.random())
                 if spike_roll < 0.14:

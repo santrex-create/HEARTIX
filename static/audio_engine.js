@@ -18,6 +18,17 @@ class HeartixAudioEngine {
     this._muteRemaining = 0;
     this._muteTimerId = null;
     this._onMuteTick = null;
+
+    // Auto-unlock Web Audio on first user interaction anywhere in the window
+    const autoUnlock = () => {
+      this.unlock();
+      if (this.unlocked) {
+        document.removeEventListener("pointerdown", autoUnlock);
+        document.removeEventListener("keydown", autoUnlock);
+      }
+    };
+    document.addEventListener("pointerdown", autoUnlock, { passive: true });
+    document.addEventListener("keydown", autoUnlock, { passive: true });
   }
 
   /**
@@ -49,8 +60,8 @@ class HeartixAudioEngine {
     }
 
     const now = this.ctx.currentTime + delaySec;
-    const attack = 0.005;  // 5 ms smooth attack
-    const release = 0.005; // 5 ms smooth release
+    const attack = 0.005;
+    const release = 0.005;
     const sustainEnd = Math.max(now + attack, now + durationSec - release);
 
     const osc = this.ctx.createOscillator();
@@ -79,17 +90,10 @@ class HeartixAudioEngine {
     this._playTone(880, 0.055, 0.11, 0);
   }
 
-  /**
-   * Enables or disables the R-peak QRS systolic tone.
-   * @param {boolean} enabled
-   */
   setQrsBeepEnabled(enabled) {
     this.qrsBeepEnabled = Boolean(enabled);
   }
 
-  /**
-   * Clears any active alarm intervals and pending burst pulse timeouts.
-   */
   _clearAlarmTimers() {
     if (this._alarmIntervalId !== null) {
       clearInterval(this._alarmIntervalId);
@@ -100,12 +104,8 @@ class HeartixAudioEngine {
     }
   }
 
-  /**
-   * Schedules an urgent 5-pulse High Priority burst: (beep-beep-beep — beep-beep) at 960 Hz.
-   */
   _emitHighBurst() {
     if (this._muted || !this.unlocked) return;
-    // Pattern offsets in ms: 3 rapid pulses, brief pause, 2 rapid pulses
     const offsetsMs = [0, 140, 280, 520, 660];
     offsetsMs.forEach((offset) => {
       const id = setTimeout(() => {
@@ -117,9 +117,6 @@ class HeartixAudioEngine {
     });
   }
 
-  /**
-   * Schedules a 3-pulse Medium Priority warning burst: (beep — beep — beep) at 660 Hz.
-   */
   _emitMediumBurst() {
     if (this._muted || !this.unlocked) return;
     const offsetsMs = [0, 240, 480];
@@ -133,13 +130,12 @@ class HeartixAudioEngine {
     });
   }
 
-  /**
-   * Sets clinical alarm priority level and manages IEC 60601-1-8 inspired repeating bursts.
-   * @param {"none" | "technical" | "low" | "medium" | "high"} level
-   */
   setAlarmLevel(level) {
     const normalized = String(level || "none").toLowerCase();
-    if (this.alarmLevel === normalized && (this._alarmIntervalId !== null || (normalized !== "high" && normalized !== "medium"))) {
+    if (
+      this.alarmLevel === normalized &&
+      (this._alarmIntervalId !== null || (normalized !== "high" && normalized !== "medium"))
+    ) {
       return;
     }
 
@@ -157,12 +153,8 @@ class HeartixAudioEngine {
         this._emitMediumBurst();
       }, 8000);
     }
-    // "none", "technical", "low" stop repeating clinical alarms
   }
 
-  /**
-   * Plays a gentle 2-tone 440 Hz -> 370 Hz chime once for technical events (Leads Off / Disconnect).
-   */
   triggerTechnicalAlert() {
     if (this._muted || !this.unlocked) return;
     this._playTone(440, 0.13, 0.14, 0);
@@ -174,18 +166,12 @@ class HeartixAudioEngine {
     this._scheduledTimeoutIds.push(id);
   }
 
-  /**
-   * Toggles a 120-second ICU Audio Pause countdown; invokes onTickCallback(remainingSeconds) every second.
-   * @param {function(number): void} [onTickCallback]
-   * @returns {boolean} Current muted state after toggle
-   */
   toggleMute2Min(onTickCallback) {
     if (typeof onTickCallback === "function") {
       this._onMuteTick = onTickCallback;
     }
 
     if (this._muted) {
-      // Unmute immediately
       this._muted = false;
       this._muteRemaining = 0;
       if (this._muteTimerId !== null) {
@@ -198,7 +184,6 @@ class HeartixAudioEngine {
       return false;
     }
 
-    // Activate 120-second audio pause
     this._muted = true;
     this._muteRemaining = 120;
     while (this._scheduledTimeoutIds.length > 0) {
@@ -227,17 +212,10 @@ class HeartixAudioEngine {
     return true;
   }
 
-  /**
-   * Returns true if ICU 2-minute Audio Pause is currently active.
-   * @returns {boolean}
-   */
   isMuted() {
     return this._muted;
   }
 
-  /**
-   * Immediately halts all active alarm timers and mute countdowns.
-   */
   stopAll() {
     this.alarmLevel = "none";
     this._clearAlarmTimers();
