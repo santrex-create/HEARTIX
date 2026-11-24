@@ -1,28 +1,9 @@
-# Python virtual environment & cache
 venv/
-.venv/
 __pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-
-# Local secrets & environment variables
+*.pyc
 .env
-.env.local
+Reports/
+Backup_code.og/
+heartix_all_code.txt
 firmware/heartix_esp32/secrets.h
-
-# Exported test data & logs
-*.csv
-*.log
-
-# IDE & editor files
-.vscode/
-.idea/
-
-# Windows & OS clutter
-Thumbs.db
-Desktop.ini
 .DS_Store
-
-# Arduino build output (if compiled locally)
-firmware/**/build/
